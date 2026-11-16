@@ -184,7 +184,7 @@ rather than to Python.
 |---|---|
 | **Network** | Only `127.0.0.1`: Ollama (port 11434), LM Studio (port 1234), and one `GET /v1/models` to each other program listening on a local port (1024–49151) to see whether it is an LLM server; one that isn't is not asked again. The Hugging Face library runs offline (`HF_HUB_OFFLINE=1`), so no model is ever downloaded by the app. |
 | **Your voice** | Kept in memory during the dictation, never written to disk (unless you run it from a terminal with `--debug`, see [Development](#development)). |
-| **Dictated text** | Typed or pasted into your app, shown in the menu's status line, never written to disk. The clipboard is used for the paste, marked as transient so clipboard managers skip it, and then restored. |
+| **Dictated text** | Typed or pasted into your app, never written to disk and not shown in the menu (its status line only says what the app is doing; a terminal run prints the text). The clipboard is used for the paste, marked as transient so clipboard managers skip it, and then restored. |
 | **Files it writes** | Menu choices: `~/Library/Preferences/com.riccardoroselli.stt-clean.plist`. Glossary: `config/glossary.txt`. Log of the current run (status and errors, no dictated text): `logs/stt-clean.log`, overwritten at each launch. |
 
 ## Troubleshooting

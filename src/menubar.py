@@ -25,12 +25,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI = None                 # the MenuBar, once created
 
 
-def status(msg: str, keep: bool = False, log: bool = True) -> None:
+def status(msg: str, keep: bool = False, log: bool = True, detail: str = "") -> None:
     """Show `msg` in the menu's status line and print it. In a terminal the line is redrawn in place
-    unless `keep`; the app's log file gets every message except log=False ones (live drafts and
-    dictated text: nothing you say is written to disk)."""
+    unless `keep`, followed by `detail`: the dictated text, which only a terminal run shows (never
+    the menu, never the log file). log=False keeps a repeated message out of the log."""
     if sys.stdout.isatty():
-        print(f"\r\033[K{msg}", end="\n" if keep else "", flush=True)
+        print(f"\r\033[K{msg}{detail}", end="\n" if keep else "", flush=True)
     elif log:
         print(msg, flush=True)
     if UI is not None:
@@ -328,6 +328,7 @@ class MenuBar(NSObject):
             status("⚠️  Switch the speech model after this dictation.", keep=True)
             return
         self.ready = False                 # no new dictation until it's loaded
+        self.current_stt = (engine, model)  # ticked at once; the worker puts the old one back if this fails
         self.show()
         self.events.put(("stt", (engine, model)))
 
@@ -340,6 +341,7 @@ class MenuBar(NSObject):
         if not was_on:
             self.save({"llm": True})       # picking an LLM means using it
         if choice != self.current_llm:
+            self.current_llm = choice      # ticked at once; the worker puts the old one back if this fails
             self.events.put(("llm_model", choice))
         elif not was_on:
             self.events.put(("llm", True))

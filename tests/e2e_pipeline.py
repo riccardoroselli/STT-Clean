@@ -27,10 +27,10 @@ SPEED = 4                 # the audio is fed this many times faster than real ti
 said: list = []           # every status line of the worker
 
 
-def status(msg, keep=False, log=True):
-    said.append(msg)
+def status(msg, keep=False, log=True, detail=""):
+    said.append(msg + detail)
     if not msg.startswith("●"):
-        print(f"    {msg}", flush=True)
+        print(f"    {msg}{detail}", flush=True)
 
 
 class FakeMenuBar:
@@ -77,10 +77,10 @@ def dictate(ui, text: str) -> tuple[str, str, int]:
         ui.events.put(("audio", audio[i:i + block]))
         time.sleep(max(0, t0 + (i + block) / ui.sr / SPEED - time.monotonic()))
     ui.events.put(("stop", None))
-    raw = wait_for("✓", since).split("] ", 1)[1]
-    cleaned = wait_for("✨ [|(LLM skipped", since)
-    cleaned = raw if cleaned.endswith("(unchanged)") else cleaned.split("] ", 1)[-1].replace(" ⏎ ", "\n")
-    return raw, cleaned, sum(m.startswith("● ") and len(m) > 20 for m in said[since:])
+    raw = wait_for("✓", since).split(": ", 1)[1]
+    cleaned = wait_for("✨ 0|✨ 1|✨ 2|✨ 3|✨ 4|✨ 5|✨ 6|✨ 7|✨ 8|✨ 9|(LLM skipped", since)
+    cleaned = cleaned.split(": ", 1)[-1].replace(" ⏎ ", "\n")
+    return raw, cleaned, sum(m.startswith("● Recording ... ") and len(m) > 30 for m in said[since:])
 
 
 def main() -> None:

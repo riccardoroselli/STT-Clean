@@ -19,6 +19,7 @@ This file: the options and the worker loop.
 """
 import argparse
 import atexit
+import gc
 import os
 import queue
 import shutil
@@ -132,7 +133,7 @@ def work(args, ui: MenuBar) -> None:
             warming = threading.Thread(target=warm, daemon=True)
             warming.start()
             return None
-        status(f"Loading {llm_name()} ...")
+        status(f"Loading the LLM {llm_name()} into memory ...")
         warm()
         return None if loaded else f"LLM warm-up failed: {cleaner.last_error}"
 
@@ -143,7 +144,7 @@ def work(args, ui: MenuBar) -> None:
         loaded = False
 
     def load_speech(engine: str, model: str):
-        status(f"Loading {model} ({engine}) ...")
+        status(f"Loading the speech model {model.split('/')[-1]} into memory ...")
         new, new_sr = stt.load(engine, model)
         new(np.zeros(new_sr, dtype=np.float32))   # warm-up
         return new, new_sr
@@ -218,7 +219,7 @@ def work(args, ui: MenuBar) -> None:
 
     def finish(audio: np.ndarray) -> None:
         nonlocal loaded
-        status("… transcribing")
+        status("… Transcribing ...")
         t0 = time.perf_counter()
         text = tail.final(audio)
         dt = time.perf_counter() - t0
@@ -226,11 +227,12 @@ def work(args, ui: MenuBar) -> None:
             status("(no speech detected)", keep=True)
             erase_draft()
             return
-        status(f"✓ [{len(audio) / sr:.1f}s audio, {dt:.2f}s] {text}", keep=True, log=False)   # no dictated text on disk
+        # what was said is the `detail`: shown by a terminal run only, never in the menu or the log
+        status(f"✓ {dt:.2f} s - {len(audio) / sr:.1f} s of speech transcribed", keep=True, detail=f": {text}")
         glossary.maybe_reload()
         text = glossary.apply(text)
         if ui.settings["llm"]:
-            status("✨ cleaning up ...")
+            status("✨ Polishing the text ...")
             t0 = time.perf_counter()
             settle()                      # the model may still be loading (it was freed while idle)
             cleaned = cleaner.clean(text, style=ui.settings["style"])
@@ -240,8 +242,8 @@ def work(args, ui: MenuBar) -> None:
                 status(f"(LLM skipped, raw text pasted: {cleaner.last_error})", keep=True)
             else:
                 problem("llm")            # e.g. its server was started by hand since the warning
-                status(f"✨ [{dt:.2f}s] " + (cleaned.replace("\n", " ⏎ ") if cleaned != text else "(unchanged)"),
-                       keep=True, log=False)
+                status(f"✨ {dt:.2f} s - text polished" + ("" if cleaned != text else " (unchanged)"), keep=True,
+                       detail=": " + cleaned.replace("\n", " ⏎ "))
                 text = cleaned
         deliver(text)
 
@@ -279,6 +281,7 @@ def work(args, ui: MenuBar) -> None:
             if error := llm_error():
                 llm_free()                # it may have loaded before failing (e.g. it answers instead of cleaning)
                 cleaner = old
+                ui.current_llm = (old.provider, old.model)   # the menu ticked the new one when it was picked
                 llm_error()
                 status(f"⚠️  {model} didn't work, still using {old.model}: {error}", keep=True)
             else:
@@ -288,9 +291,11 @@ def work(args, ui: MenuBar) -> None:
 
         elif kind == "stt":               # picked in the Speech menu (the menu set ui.ready = False)
             new_engine, new_model = data
+            tail = None                   # the last recording's: it still holds the old model
             try:
                 new, new_sr = load_speech(new_engine, new_model)
             except Exception as e:
+                ui.current_stt = (engine, stt_model)         # the menu ticked the new one when it was picked
                 status(f"⚠️  {new_model} didn't load, still using {stt_model or 'none'}: {type(e).__name__}: {e}", keep=True)
             else:
                 transcribe, sr, engine, stt_model = new, new_sr, new_engine, new_model
@@ -298,7 +303,8 @@ def work(args, ui: MenuBar) -> None:
                 AppHelper.callAfter(ui.save, {"stt": engine, "stt_model": stt_model})
                 problem("speech")
                 status(f"Speech model: {stt_model} ({engine}).", keep=True)
-            stt.free_cache()              # the old model's buffers
+            gc.collect()                  # the old model (or the one that failed), then its buffers
+            stt.free_cache()
             ui.ready = transcribe is not None
             AppHelper.callAfter(ui.show)
 
@@ -311,7 +317,7 @@ def work(args, ui: MenuBar) -> None:
             if ui.settings["llm"] and not loaded and not (warming and warming.is_alive()):
                 llm_error(wait=False)     # freed while idle, or its server wasn't running: load it while you speak
             play(SOUND_START)
-            status("● recording ...")
+            status("● Recording ...")
 
         elif kind == "audio" and recording:
             chunk = resample(data, capture_sr, sr)
@@ -329,8 +335,8 @@ def work(args, ui: MenuBar) -> None:
                 so_far = np.concatenate(chunks)
                 chunks = [so_far]
                 draft = tail.draft(so_far)
-                cols = shutil.get_terminal_size().columns - 3   # one line, or \r can't redraw it
-                status("● " + (draft[-cols:] if draft else "recording ..."), log=False)
+                cols = shutil.get_terminal_size().columns - 18   # one line, or \r can't redraw it
+                status("● Recording ...", log=False, detail=" " + draft[-cols:])
                 if can_type and can_post(target):   # else skip this update: the next one catches up
                     new = advance(typed, prev, draft)
                     retype(typed, new)
