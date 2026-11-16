@@ -76,7 +76,8 @@ Download a speech model with the Hugging Face CLI that `install.sh` put in `.ven
 
 Whisper models in other formats are not found: whisper.cpp or MacWhisper `.bin` files,
 faster-whisper, OpenAI `.pt` files, Transformers `openai/whisper-*`. Whisper pads every clip to
-30 s, so with large Whisper models the live draft updates less often than with Parakeet.
+30 s: with `whisper-large-v3-turbo` on an M4 a live update takes about 2 s (Parakeet: 0.2–0.5 s), and
+the final transcript of a 70 s dictation is ready 2 s after you stop.
 
 The LLM is optional; without one you get the raw transcript. For the refinement, either install
 Ollama and run `ollama pull gemma4:12b-mlx` (7.7 GB, ~8 GB of RAM while loaded), download a model in

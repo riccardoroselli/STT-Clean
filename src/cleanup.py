@@ -267,15 +267,18 @@ class Cleaner:
                  "WARNING", "--chat-template-args", '{"enable_thinking": false}'], stdout=subprocess.DEVNULL, stderr=log)
             end = time.monotonic() + wait
             while time.monotonic() < end and self.process.poll() is None:
-                try:
-                    self._post("/health", None, 1, f"http://127.0.0.1:{port}")
+                try:                                    # healthy while it loads the model too: the first
+                    self._post("/health", None, 1, f"http://127.0.0.1:{port}")   # request then waits for it
                     return True
+                except urllib.error.HTTPError:          # 503: loading the model failed (e.g. not an LLM mlx-lm knows)
+                    break
                 except Exception:
                     time.sleep(0.3)
             self.unload()
             log.seek(0)
-            why = log.read().decode(errors="replace").strip().splitlines() or ["no answer"]
-        self.last_error = f"the built-in server didn't start: {why[-1]}"
+            why = [line for line in log.read().decode(errors="replace").splitlines()
+                   if line.strip() and "GET /health" not in line] or ["no answer"]
+        self.last_error = f"the built-in server didn't start: {why[-1].strip()}"
         return False
 
     def warm_up(self) -> bool:

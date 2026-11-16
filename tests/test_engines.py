@@ -232,11 +232,17 @@ class TestLLMProviders(unittest.TestCase):
             self.assertIsNotNone(process.poll())             # the server is gone, and its memory with it
             self.assertTrue(c.warm_up())                     # e.g. after the idle unload: started again
             self.assertEqual(c.clean("ciao"), "CIAO")
-        with mock.patch.object(cleanup, "MLX_MAIN", "raise SystemExit('Model type x not supported.')"):
-            c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
-            self.assertFalse(c.warm_up())
-            self.assertIn("Model type x not supported.", c.last_error)
-            self.assertIsNone(c.process)
+        # the two ways it fails: it exits, or (as mlx-lm does for a model it can't load) it stays up unhealthy
+        unhealthy = ("import sys\nprint('ValueError: Model type x not supported.', file=sys.stderr, flush=True)\n"
+                     + STUB_SERVER.replace('self.reply({"status": "ok"})', "self.send_error(503)"))
+        for broken in ("raise SystemExit('ValueError: Model type x not supported.')", unhealthy):
+            with mock.patch.object(cleanup, "MLX_MAIN", broken):
+                c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
+                t0 = time.monotonic()
+                self.assertFalse(c.warm_up())
+                self.assertLess(time.monotonic() - t0, 10)       # at once, not after the 3 minutes a load may take
+                self.assertIn("Model type x not supported.", c.last_error)
+                self.assertIsNone(c.process)
 
     def test_built_in_server_quits_with_its_parent(self):
         import cleanup
