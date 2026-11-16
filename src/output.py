@@ -5,7 +5,7 @@ import time
 
 import objc
 import Quartz
-from AppKit import NSObject, NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
+from AppKit import NSData, NSObject, NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSWorkspace
 from ApplicationServices import (AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
                                  AXUIElementSetMessagingTimeout, kAXFocusedUIElementAttribute, kAXFocusedWindowAttribute)
 
@@ -105,10 +105,11 @@ def paste(text: str, typed: str) -> bool:
     clip.text, clip.read = text, threading.Event()
     item = NSPasteboardItem.alloc().init()
     item.setDataProvider_forTypes_(clip, [NSPasteboardTypeString])
+    item.setData_forType_(NSData.data(), "org.nspasteboard.TransientType")   # clipboard managers skip it (nspasteboard.org)
     pb.clearContents()
     pb.writeObjects_([item])
     post_key(V_KEYCODE, flags=CMD)
-    # shortcut: a clipboard manager reading first counts as the paste (old clipboard back too early), none installed
+    # shortcut: a clipboard manager that ignores the transient mark and reads first counts as the paste
     if not clip.read.wait(10 + erase / 50):
         copy(text)                         # as plain data: the lazy item dies with its provider
         return False

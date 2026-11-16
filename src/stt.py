@@ -2,8 +2,9 @@
 
 available() lists the models a click away (downloaded, engine installed): the menu's Speech list.
 load(engine, model) -> (transcribe, sample_rate). transcribe(audio) takes 1-D float32
-mono audio at sample_rate, in [-1, 1], and returns the text. Each engine imports its package only
-when picked, so only the engine in use has to be installed.
+mono audio at sample_rate, in [-1, 1], and returns its sentences as (text, start, end) in seconds;
+text(sentences) joins them. Each engine imports its package only when picked, so only the engine
+in use has to be installed.
 
     parakeet  NVIDIA Parakeet TDT with parakeet-mlx (default)
     whisper   OpenAI Whisper family with mlx-whisper (install.sh adds it without PyTorch)
@@ -42,6 +43,10 @@ def available() -> list[tuple[str, str]]:
     return found
 
 
+def text(sentences: list) -> str:
+    return " ".join(s[0] for s in sentences)
+
+
 def free_cache() -> None:
     """Between dictations: give MLX's buffer cache (~1 GB after a long clip) back to the system.
     Measured: the next transcription is as fast (5-40 s clips, 27 Oct 2026)."""
@@ -65,9 +70,10 @@ def _parakeet(model: str):
     m = from_pretrained(model)
     mx.set_cache_limit(MLX_CACHE)
 
-    def transcribe(audio: np.ndarray) -> str:
+    def transcribe(audio: np.ndarray) -> list:
         # get_logmel needs float32 (it reinterprets the complex STFT as 4-byte floats)
-        return m.generate(get_logmel(mx.array(audio.astype(np.float32)), m.preprocessor_config))[0].text.strip()
+        result = m.generate(get_logmel(mx.array(audio.astype(np.float32)), m.preprocessor_config))[0]
+        return [(s.text.strip(), s.start, s.end) for s in result.sentences if s.text.strip()]
     return transcribe, m.preprocessor_config.sample_rate
 
 
@@ -80,10 +86,11 @@ def _whisper(model: str):
         raise ImportError("the whisper engine needs mlx-whisper: run ./install.sh again") from None
     mx.set_cache_limit(MLX_CACHE)
 
-    def transcribe(audio: np.ndarray) -> str:   # the model is loaded (and cached) on the first call
+    def transcribe(audio: np.ndarray) -> list:   # the model is loaded (and cached) on the first call
         # temperature 0 = no random retries: a 40 s clip took 5.1 s and came out garbled with them, 1.0 s
         # without, and the live drafts stay comparable; no previous-text conditioning: no repeat loops past 30 s
-        return mlx_whisper.transcribe(audio.astype(np.float32), path_or_hf_repo=model, temperature=0.0,
-                                      condition_on_previous_text=False)["text"].strip()
+        result = mlx_whisper.transcribe(audio.astype(np.float32), path_or_hf_repo=model, temperature=0.0,
+                                        condition_on_previous_text=False)
+        return [(s["text"].strip(), s["start"], s["end"]) for s in result["segments"] if s["text"].strip()]
     return transcribe, SAMPLE_RATE
 

@@ -35,7 +35,7 @@ import stt
 from audio import SOUND_CANCEL, SOUND_START, SOUND_STOP, play, resample
 import cleanup
 from cleanup import DEFAULT_LLM, Cleaner, Glossary
-from live import advance
+from live import Tail, advance
 from menubar import GLOSSARY, ROOT, MenuBar, status
 from output import can_post, copy, paste, retype
 
@@ -152,7 +152,11 @@ def work(args, ui: MenuBar) -> None:
     capture_sr = sr           # the mic's rate for this recording (resampled to sr)
     target = ()               # focus() at start (app, window, field): the only place we type into
     chunks: list = []
+    tail = None               # Tail of this recording: transcribes only what isn't finished yet
     fresh = 0                 # samples recorded since the last live-draft update
+    floor = 0.0               # level of this recording's quietest 50 ms (the room's noise)
+    heard = False             # something louder than the room since the last live-draft update
+    still = False             # the last two live drafts were the same
     typed = ""                # live draft currently typed in the focused app
     prev = ""                 # previous live draft
     drafts: list = []         # (samples, draft, typed) of each live update, for --debug
@@ -178,7 +182,7 @@ def work(args, ui: MenuBar) -> None:
     def finish(audio: np.ndarray) -> None:
         status("… transcribing")
         t0 = time.perf_counter()
-        text = transcribe(audio)
+        text = tail.final(audio)
         dt = time.perf_counter() - t0
         if not text:
             status("(no speech detected)", keep=True)
@@ -244,6 +248,7 @@ def work(args, ui: MenuBar) -> None:
 
         elif kind == "start":
             recording, chunks, fresh, typed, prev, drafts = True, [], 0, "", "", []
+            tail, floor, heard, still = Tail(transcribe, sr), float("inf"), False, False
             capture_sr, target = data
             can_type = not args.no_paste and AXIsProcessTrusted()   # re-checked: may be allowed mid-run
             play(SOUND_START)
@@ -253,21 +258,25 @@ def work(args, ui: MenuBar) -> None:
             chunk = resample(data, capture_sr, sr)
             chunks.append(chunk)
             fresh += len(chunk)
-            # live draft: re-transcribe the whole clip every ~0.5 s, once the queue is drained
-            # (transcribe_stream was too unstable for this, see CLAUDE.md).
-            # shortcut: cost grows with length (~0.5 s per update at 40 s, ~1 s at 50 s); if
-            # multi-minute dictations lag, freeze old sentences and re-transcribe only the tail
-            if ui.settings["live"] and fresh >= sr // 2 and events.empty():
-                fresh = 0
+            level = float(np.sqrt(np.mean(chunk * chunk)))
+            floor = min(floor, level)
+            heard = heard or level > 4 * floor
+            # live draft: every ~0.5 s, once the queue is drained, transcribe again what isn't finished
+            # yet (transcribe_stream was too unstable for this, see CLAUDE.md). Not during silence:
+            # once two drafts are the same, wait for a sound above the room's level (or 3 s).
+            if (ui.settings["live"] and fresh >= sr // 2 and events.empty()
+                    and (heard or not still or fresh >= 3 * sr)):
+                fresh, heard = 0, False
                 so_far = np.concatenate(chunks)
-                draft = transcribe(so_far)
+                chunks = [so_far]
+                draft = tail.draft(so_far)
                 cols = shutil.get_terminal_size().columns - 3   # one line, or \r can't redraw it
                 status("● " + (draft[-cols:] if draft else "recording ..."), log=False)
                 if can_type and can_post(target):   # else skip this update: the next one catches up
                     new = advance(typed, prev, draft)
                     retype(typed, new)
                     typed = new
-                prev = draft
+                still, prev = draft == prev, draft
                 drafts.append((len(so_far), draft, typed))
 
         elif kind == "cancel" and recording:

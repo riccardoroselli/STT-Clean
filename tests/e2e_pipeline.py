@@ -44,7 +44,7 @@ def main() -> None:
         for phrase in PHRASES:
             audio = speak(phrase, sr)
             t0 = time.perf_counter()
-            raw = transcribe(audio)
+            raw = stt.text(transcribe(audio))
             t1 = time.perf_counter()
             out = cleaner.clean(glossary.apply(raw))
             t2 = time.perf_counter()

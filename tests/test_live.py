@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from AppKit import NSData, NSPasteboard  # noqa: E402
-from live import advance, diff  # noqa: E402
+from live import Tail, advance, diff  # noqa: E402
 from output import can_post, clipboard_items, focus  # noqa: E402
 
 
@@ -94,6 +94,47 @@ class TestClipboard(unittest.TestCase):
         pb.writeObjects_(saved)
         self.assertEqual(bytes(pb.dataForType_("public.png")), b"\x89PNG fake")
         self.assertEqual(pb.stringForType_("public.utf8-plain-text"), "città")
+
+
+class TestTail(unittest.TestCase):
+    """Fake speech model: one "sentence" per second of audio at 10 samples/s, named after the second it
+    starts in; the newest one is still changing (ends with "?") until audio follows it."""
+
+    def setUp(self):
+        self.calls = []       # seconds of audio in each transcription
+
+        def transcribe(audio):
+            self.calls.append(len(audio) / 10)
+            n = len(audio) // 10
+            return [(f"s{int(audio[i * 10])}" + ("?" if i == n - 1 else "."), i, i + 1.0) for i in range(n)]
+        self.tail = Tail(transcribe, 10)
+        self.audio = [t // 10 for t in range(3000)]      # 300 s; each sample holds its second
+
+    def test_live_drafts_only_redo_the_unfinished_tail(self):
+        for n in range(5, 1205, 5):                      # a draft every 0.5 s for 2 minutes
+            draft = self.tail.draft(self.audio[:n])
+        self.assertEqual(draft, " ".join(f"s{i}." for i in range(119)) + " s119?")
+        self.assertLessEqual(max(self.calls), 5)         # never more than a few seconds, however long the clip
+        self.assertEqual(self.tail.final(self.audio[:1200]), draft)
+
+    def test_sentence_needs_two_drafts_a_follower_and_the_margin(self):
+        self.assertEqual(self.tail.draft(self.audio[:40]), "s0. s1. s2. s3?")
+        self.assertEqual(self.tail.start, 0)             # first draft: nothing to agree with
+        self.tail.draft(self.audio[:40])
+        self.assertEqual((self.tail.start, self.tail.done), (20, ["s0.", "s1."]))   # s2 ended <2 s ago, s3 is last
+
+    def test_final_without_drafts_goes_in_windows(self):
+        text = self.tail.final(self.audio)               # live text off: 300 s at once
+        self.assertEqual(text, " ".join(f"s{i}." for i in range(299)) + " s299?")
+        self.assertLessEqual(max(self.calls), 60)
+
+    def test_window_without_sentence_end_is_cut(self):
+        tail = Tail(lambda audio: [("word", 0, len(audio) / 10)] if len(audio) else [], 10)
+        self.assertEqual(tail.final(self.audio[:1500]), "word word word")   # 60 + 60 + 30 s
+
+    def test_short_and_empty(self):
+        self.assertEqual(self.tail.final(self.audio[:0]), "")
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
