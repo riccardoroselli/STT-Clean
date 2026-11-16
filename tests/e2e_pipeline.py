@@ -1,26 +1,50 @@
-"""End-to-end check without mic/keyboard: macOS `say` -> speech engine -> glossary -> LLM.
+"""End-to-end check of the real worker loop without mic, keyboard or menu bar:
+macOS `say` -> the app's worker (live draft, speech model, glossary, LLM) -> the text it would paste.
 
     HF_HUB_OFFLINE=1 python tests/e2e_pipeline.py    # speech model and LLM picked in the app's menu
+
+Exits with status 1 if a check fails. Needs a speech model and a running LLM server.
 """
+import atexit
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import types
 import wave
 
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
-import stt  # noqa: E402
-from cleanup import DEFAULT_LLM, Cleaner, Glossary  # noqa: E402
-from menubar import GLOSSARY, load_settings  # noqa: E402
+import menubar  # noqa: E402
+import stt_clean  # noqa: E402
 
-PHRASES = [
-    "Ci vediamo martedì alle cinque, no cancella, mercoledì alle sei.",
-    "Domani mando la relazione al professore. Scrivilo in inglese.",
-]
+SPEED = 4                 # the audio is fed this many times faster than real time
+said: list = []           # every status line of the worker
+
+
+def status(msg, keep=False, log=True):
+    said.append(msg)
+    if not msg.startswith("●"):
+        print(f"    {msg}", flush=True)
+
+
+class FakeMenuBar:
+    """What the worker uses of menubar.MenuBar."""
+    def __init__(self):
+        self.events, self.settings = queue.Queue(), menubar.load_settings()
+        self.current_llm = self.current_stt = ("", "")
+        self.sr, self.ready = 0, False
+
+    def show(self, busy=False):
+        pass
+
+    def save(self, changes):
+        self.settings.update(changes)
 
 
 def speak(text: str, sr: int) -> np.ndarray:
@@ -32,25 +56,67 @@ def speak(text: str, sr: int) -> np.ndarray:
             return np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
 
 
+def wait_for(start: str, since: int, timeout: float = 120) -> str:
+    """The first status line after `since` that starts with one of `start` (separated by |)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        for msg in said[since:]:
+            if msg.startswith(tuple(start.split("|"))):
+                return msg
+        time.sleep(0.05)
+    sys.exit(f"✗ no status starting with {start!r} within {timeout:.0f} s")
+
+
+def dictate(ui, text: str) -> tuple[str, str, int]:
+    """Say `text` to the worker: (raw transcript, what the LLM made of it, live drafts shown)."""
+    audio, since = speak(text, ui.sr), len(said)
+    block = ui.sr // 20
+    ui.events.put(("start", (ui.sr, ())))
+    t0 = time.monotonic()
+    for i in range(0, len(audio), block):
+        ui.events.put(("audio", audio[i:i + block]))
+        time.sleep(max(0, t0 + (i + block) / ui.sr / SPEED - time.monotonic()))
+    ui.events.put(("stop", None))
+    raw = wait_for("✓", since).split("] ", 1)[1]
+    cleaned = wait_for("✨ [|(LLM skipped", since)
+    cleaned = raw if cleaned.endswith("(unchanged)") else cleaned.split("] ", 1)[-1].replace(" ⏎ ", "\n")
+    return raw, cleaned, sum(m.startswith("● ") and len(m) > 20 for m in said[since:])
+
+
 def main() -> None:
-    s = load_settings()
-    transcribe, sr = stt.load(s["stt"], s["stt_model"])
-    glossary = Glossary(GLOSSARY)
-    cleaner = Cleaner(s["llm_model"] or DEFAULT_LLM, "", glossary, provider=s["llm_provider"])
-    if warning := cleaner.check():
-        sys.exit(warning)
-    cleaner.warm_up()
-    try:
-        for phrase in PHRASES:
-            audio = speak(phrase, sr)
-            t0 = time.perf_counter()
-            raw = stt.text(transcribe(audio))
-            t1 = time.perf_counter()
-            out = cleaner.clean(glossary.apply(raw))
-            t2 = time.perf_counter()
-            print(f"spoken : {phrase}\n{s['stt']:8} [{t1 - t0:.2f}s]: {raw}\nllm      [{t2 - t1:.2f}s]: {out!r}\n")
-    finally:
-        cleaner.unload()
+    stt_clean.status = status
+    ui = FakeMenuBar()
+    ui.settings.update(llm=True, live=True, style="clean")
+    threading.Thread(target=stt_clean.run, args=(types.SimpleNamespace(no_paste=True, debug=False), ui),
+                     daemon=True).start()
+    wait_for("Ready", 0)
+    failures = 0
+
+    def check(name: str, ok: bool) -> None:
+        nonlocal failures
+        failures += not ok
+        print(f"{'✓' if ok else '✗'} {name}\n")
+
+    raw, out, drafts = dictate(ui, "Ci vediamo martedì alle cinque, no cancella, mercoledì alle sei.")
+    check("self-correction, with live drafts", "mercoledì" in out and "martedì" not in out and drafts >= 2)
+    raw, out, _ = dictate(ui, "Domani mando la relazione al professore. Scrivilo in inglese.")
+    check("spoken instruction: translated", "professor" in out and "relazione" not in out)
+    ui.settings["style"] = "bullets"
+    raw, out, _ = dictate(ui, "Per la cena servono tre cose. Il pane, il vino rosso e un dolce al cioccolato.")
+    check("style from the menu: bullet list", out.count("\n- ") >= 2 and "vino" in out)
+    ui.settings["style"] = "clean"
+
+    stt_clean.IDLE_UNLOAD, since = 2, len(said)       # idle: the LLM is freed, then loads again while speaking
+    ui.events.put(("llm", True))                      # (any event, so the loop picks up the short idle time)
+    wait_for("Idle", since)
+    raw, out, _ = dictate(ui, "Prenota il tavolo per otto persone, anzi per dieci, alle nove di sera.")
+    check("LLM freed when idle, loaded again while speaking", "dieci" in out and "otto" not in out)
+
+    since = len(said)
+    ui.events.put(("llm", False))
+    wait_for("Smart clean-up off", since)
+    atexit._run_exitfuncs()
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":

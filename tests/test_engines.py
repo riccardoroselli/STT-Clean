@@ -4,8 +4,10 @@
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -13,6 +15,28 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 import stt  # noqa: E402
 from cleanup import Cleaner, Glossary, strip_wrapping  # noqa: E402
+
+
+# stands in for mlx-lm's server: /health, and a chat completion that shouts the dictation back
+STUB_SERVER = """
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def reply(self, data):
+        out = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+    def do_GET(self):
+        self.reply({"status": "ok"})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.reply({"choices": [{"message": {"content": body["messages"][-1]["content"].upper()}, "finish_reason": "stop"}]})
+HTTPServer(("127.0.0.1", int(sys.argv[sys.argv.index("--port") + 1])), Handler).serve_forever()
+"""
 
 
 class TestSpeechEngines(unittest.TestCase):
@@ -51,7 +75,7 @@ class TestSpeechEngines(unittest.TestCase):
 class TestLLMProviders(unittest.TestCase):
     def test_unknown_provider(self):
         for provider in ("openai", "port:", "port:80a"):
-            with self.assertRaisesRegex(ValueError, "ollama, lmstudio or port:<number>"):
+            with self.assertRaisesRegex(ValueError, "ollama, lmstudio, mlx or port:<number>"):
                 Cleaner("x", "", Glossary(None), provider=provider)
 
     def test_default_urls(self):
@@ -101,6 +125,23 @@ class TestLLMProviders(unittest.TestCase):
         self.assertIsNone(c.clean("ciao come stai"))
         self.assertIn("cut off", c.last_error)
 
+    def test_model_that_thinks_anyway_gets_room_for_it(self):
+        for provider, cut, done in (
+                ("ollama", {"message": {"content": "", "thinking": "Okay, so I need to"}, "done_reason": "length"},
+                 {"message": {"content": "Ciao.", "thinking": "..."}, "done_reason": "stop"}),
+                ("port:8080", {"choices": [{"message": {"content": "<think>Okay, so"}, "finish_reason": "length"}]},
+                 {"choices": [{"message": {"content": "<think>hm</think>Ciao."}, "finish_reason": "stop"}]})):
+            c = Cleaner("deepseek-r1", "", Glossary(None), provider=provider)
+            budgets = []
+
+            def post(path, body, timeout, base=""):
+                budgets.append(body.get("max_tokens") or body["options"]["num_predict"])
+                return cut if budgets[-1] < 1000 else done
+            c._post = post
+            self.assertEqual(c.clean("ciao"), "Ciao.")
+            self.assertEqual(c.clean("ciao"), "Ciao.")
+            self.assertEqual(budgets, [66, 2114, 2114])        # one cut-off request, then room from the start
+
     def test_lmstudio_check(self):
         c = Cleaner("missing", "", Glossary(None), provider="lmstudio")
         c._post = lambda *_, **__: {"data": [{"id": "qwen3-8b"}, {"id": "text-embedding-nomic"}]}
@@ -142,7 +183,7 @@ class TestLLMProviders(unittest.TestCase):
         with mock.patch.object(Cleaner, "models", models), mock.patch.object(cleanup, "local_ports", return_value=ports), \
                 mock.patch.object(cleanup, "_not_llm", set()):
             self.assertEqual(cleanup.available(), [("llama-server (port 9931)", "port:9931", ["m1"])])
-            self.assertEqual(sorted(asked), ["lmstudio", "ollama", "port:5000", "port:9931"])
+            self.assertEqual(sorted(asked), ["lmstudio", "mlx", "ollama", "port:5000", "port:9931"])
             cleanup.available()
             self.assertEqual(asked.count("port:5000"), 1)            # not an LLM server: not asked again
             self.assertEqual(asked.count("port:9931"), 2)
@@ -159,6 +200,61 @@ class TestLLMProviders(unittest.TestCase):
         c._post = lambda path, body, timeout: sent.update(body) or {"message": {"content": "- a\n- b"}}
         self.assertEqual(c.clean("a e poi b", style="bullets"), "- a\n- b")
         self.assertIn("bullet list", sent["messages"][0]["content"])
+
+    def test_built_in_models_need_mlx_lm(self):
+        import cleanup
+        with tempfile.TemporaryDirectory() as hub:
+            for repo, files in [("mlx-community--some-llm-4bit", cleanup.MLX_FILES),
+                                ("mlx-community--parakeet-tdt-0.6b-v3", ["config.json", "model.safetensors"])]:
+                snap = os.path.join(hub, f"models--{repo}", "snapshots", "abc")
+                os.makedirs(snap)
+                for name in files:
+                    with open(os.path.join(snap, name), "w") as f:
+                        f.write("{}")
+            with mock.patch.dict(os.environ, {"HF_HUB_CACHE": hub}):
+                with mock.patch("importlib.util.find_spec", return_value=True):
+                    self.assertEqual(cleanup.mlx_models(), ["mlx-community/some-llm-4bit"])
+                with mock.patch("importlib.util.find_spec", return_value=None):
+                    self.assertEqual(cleanup.mlx_models(), [])
+
+    def test_built_in_server_lifecycle(self):
+        import cleanup
+        with mock.patch.object(cleanup, "MLX_MAIN", STUB_SERVER), mock.patch.object(cleanup, "mlx_models", return_value=["me/llm"]):
+            c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
+            self.addCleanup(c.unload)
+            self.assertIsNone(c.check())
+            self.assertIsNone(c.clean("ciao"))               # not started yet: no text, no crash
+            self.assertTrue(c.warm_up())
+            process = c.process
+            self.assertEqual(c.clean("ciao"), "CIAO")
+            self.assertTrue(c.serve() and c.process is process)   # already running: not started twice
+            c.unload()
+            self.assertIsNotNone(process.poll())             # the server is gone, and its memory with it
+            self.assertTrue(c.warm_up())                     # e.g. after the idle unload: started again
+            self.assertEqual(c.clean("ciao"), "CIAO")
+        with mock.patch.object(cleanup, "MLX_MAIN", "raise SystemExit('Model type x not supported.')"):
+            c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
+            self.assertFalse(c.warm_up())
+            self.assertIn("Model type x not supported.", c.last_error)
+            self.assertIsNone(c.process)
+
+    def test_built_in_server_quits_with_its_parent(self):
+        import cleanup
+        parent = ("import os, sys; sys.path.insert(0, sys.argv[1]); import cleanup; cleanup.MLX_MAIN = sys.argv[2]\n"
+                  "c = cleanup.Cleaner('m', '', cleanup.Glossary(None), provider='mlx'); assert c.serve()\n"
+                  "print(c.process.pid, flush=True); os._exit(0)")     # killed: no clean-up of its own
+        out = subprocess.run([sys.executable, "-c", parent, os.path.dirname(cleanup.__file__), STUB_SERVER],
+                             capture_output=True, text=True, timeout=30)
+        pid = int(out.stdout)
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.2)
+            except ProcessLookupError:
+                return
+        os.kill(pid, 15)
+        self.fail("the built-in server outlived STT-Clean")
 
     def test_think_block_only_at_start(self):
         self.assertEqual(strip_wrapping("x", "Use <think></think> tags"), "Use <think></think> tags")

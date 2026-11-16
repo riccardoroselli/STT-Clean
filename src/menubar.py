@@ -288,9 +288,11 @@ class MenuBar(NSObject):
         servers = cleanup.available()
         if model and not any(p == provider and model in names for _, p, names in servers):
             servers.insert(0, ("In use", provider, [model]))   # its server stopped or doesn't list it
-        sections = [(label, [(n.removesuffix(":latest"), f"{p}\t{n}", (p, n) == self.current_llm) for n in names])
+        def short(name):                            # llama.cpp names a model by its file's whole path
+            return os.path.basename(name) if name.startswith("/") else name.removesuffix(":latest")
+        sections = [(label, [(short(n), f"{p}\t{n}", (p, n) == self.current_llm) for n in names])
                     for label, p, names in servers]
-        self.llm_menu.setTitle_(f"LLM: {model.removesuffix(':latest')}" if model else "LLM")
+        self.llm_menu.setTitle_(f"LLM: {short(model)}" if model else "LLM")
         self.llm_menu.setSubmenu_(self.picker(sections, "pickLLM:", "No LLM found (see the README)"))
 
         style = self.settings["style"]

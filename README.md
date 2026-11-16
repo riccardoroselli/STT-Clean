@@ -8,11 +8,13 @@
 
 STT-Clean is a macOS menu-bar app that types what you say into any app, at the cursor. While you
 speak, a live draft appears as you talk, transcribed on your Mac by Parakeet or Whisper (MLX on
-Apple silicon). When you stop, a local LLM in Ollama or LM Studio refines it: it applies spoken
-corrections ("scratch that"), punctuation ("comma", "new line"), your glossary's spellings and
-translation ("write it in English"), and the clean text replaces the draft. It is a wrapper
-around models you already have: it finds them, lists them in its menu, and never downloads one.
-Nothing leaves your Mac. On an M4, Parakeet TDT 0.6B v3 transcribes 44 s of speech in 1.2 s, and
+Apple silicon). When you stop, a local LLM refines it: it applies spoken corrections ("scratch
+that"), punctuation ("comma", "new line"), your glossary's spellings and translation ("write it
+in English"), and the clean text replaces the draft. The LLM runs in Ollama, LM Studio or any
+other local server (llama.cpp, mlx-lm, Jan, ...). STT-Clean is a wrapper around models you
+already have: it finds them, lists them in its menu, and never downloads one. Nothing leaves your
+Mac. On an M4 with Parakeet TDT 0.6B v3, the live draft updates every 0.5 s however long you
+speak, the final transcript of a 70 s dictation is ready 0.2 s after you stop, and
 `gemma4:12b-mlx` refines a dictation in 0.6–3.3 s.
 
 | You say | Pasted |
@@ -62,7 +64,7 @@ STT-Clean uses the models already on your Mac and checks for new ones every time
 | Kind | Found in | Formats | Picked at launch |
 |---|---|---|---|
 | Speech | The Hugging Face cache: `~/.cache/huggingface/hub`, or `$HF_HOME/hub` if it was set when you ran `install.sh` | Parakeet and Whisper in MLX format (`mlx-community/…`) | Your last pick, else Parakeet TDT 0.6B v3, else the first one found |
-| LLM | Every chat model in [Ollama](https://ollama.com) and [LM Studio](https://lmstudio.ai), while they run | Any instruct model | Your last pick, else `gemma4:12b-mlx`, else the first one found |
+| LLM | Every chat model in [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and any other server running on a local port with the OpenAI-style API (`llama-server`, `mlx_lm.server`, Jan, vLLM, ...) | Any instruct model | Your last pick, else `gemma4:12b-mlx`, else the first one found |
 
 Download a speech model with the Hugging Face CLI that `install.sh` put in `.venv`:
 
@@ -85,16 +87,21 @@ refining it fail the check run when you pick them, and the previous model stays.
 
 | Action | How |
 |---|---|
-| Dictate | Click the menu-bar icon, speak, click again. A clock shows the recording time. |
+| Dictate | Click the menu-bar icon (or press your shortcut), speak, click again. The icon's bars move with your voice and a clock shows the recording time. |
 | Cancel | Esc while recording: the live text is erased, nothing is pasted. |
 | Menu | Right-click the icon. |
+| Keyboard shortcut | Menu → **Shortcut** → ⌥Space, ⌃⌥Space, ⌃⌥D or F5 starts and stops a dictation from any app. Off by default. |
 | Switch speech model or LLM | Menu → **Speech** or **LLM** → click a model. The one in use is ticked. |
+| Style | Menu → **Style**: *Clean* keeps your words, *Formal* rewrites them in a professional tone, *Bullet list* formats them as a list, *In English* translates every dictation. |
 | Smart clean-up (LLM) | Menu switch. Off: raw transcript, and the LLM's memory is freed. |
 | Live text while speaking | Menu switch. Off: only the final text is typed. |
 | Custom spellings | Menu → **Edit Glossary…** (see [Glossary](#glossary)) |
+| Fix a problem | When something is missing, the menu shows a ⚠️ item that fixes it: it starts Ollama or LM Studio's server, opens the Accessibility or Microphone setting, or shows how to get a speech model. |
 
 Your choices are remembered. Only one LLM is in memory at a time; it is unloaded when you switch,
-turn clean-up off or quit.
+turn clean-up off or quit, and after 10 minutes without a dictation. It then loads again while you
+record the next one, so only a dictation shorter than the load (about 7–12 s for a 12B model)
+waits for it.
 
 Keystrokes only go to the app, window and text field where the dictation started. Switch away and
 the typing pauses; come back and it catches up. If you're still away when the dictation ends, the
@@ -133,13 +140,16 @@ the LLM, which fixes close mis-hearings from context. Changes apply from the nex
 | Step | What happens | Code |
 |---|---|---|
 | Record | The mic opens on click and closes on stop. Esc is a global hot key only while recording. | `src/menubar.py`, `src/audio.py`, `src/esc_key.py` |
-| Live draft | Every ≥0.5 s the whole clip so far is transcribed again. Only words that two consecutive drafts agree on are typed, so the text grows instead of flickering. | `src/stt.py`, `src/live.py` |
-| Final pass | The clip is transcribed once more and the glossary's variants are replaced. | `src/stt_clean.py`, `src/cleanup.py` |
+| Live draft | Every ≥0.5 s the audio after the last finished sentence is transcribed again; finished sentences are not redone, and nothing runs while you are silent. Only words that two consecutive drafts agree on are typed, so the text grows instead of flickering. | `src/stt.py`, `src/live.py` |
+| Final pass | The unfinished tail is transcribed once more and the glossary's variants are replaced. | `src/stt_clean.py`, `src/cleanup.py` |
 | Refinement | The LLM (temperature 0, thinking off) applies the voice commands. On any failure, or an output that looks like an answer, the raw text is used. | `src/cleanup.py` |
 | Replace | Only the changed tail of the draft is erased; the rest is pasted with ⌘V. The previous clipboard (text, images, files) is restored once the app has read the paste. | `src/output.py` |
 
-With Parakeet, transcribing the whole clip again takes ~0.25 s at 10 s of audio, ~0.5 s at 30–40 s
-and ~0.9 s at 50 s. Parakeet uses ~1.3 GB of RAM; its working cache is freed after each dictation.
+A sentence is finished when two drafts in a row agree on it, another sentence follows it and it
+ended 2 s ago. With Parakeet a live update takes 0.2–0.5 s after 10 s of speech and after 3.5
+minutes alike (transcribing the whole clip each time took 0.3 s at 10 s, 1.6 s at 60 s and 6.6 s
+at 3 minutes). With live text off, a long recording is transcribed 60 s at a time. Parakeet uses
+~1.3 GB of RAM; its working cache is freed after each dictation.
 
 `build/STT-Clean.app` is a small compiled launcher (`macos/launcher.c`) that starts the Python app
 as a child process, so macOS gives the Microphone and Accessibility permissions to STT-Clean
@@ -149,9 +159,9 @@ rather than to Python.
 
 | | |
 |---|---|
-| **Network** | Only `127.0.0.1`: Ollama (port 11434) and LM Studio (port 1234). The Hugging Face library runs offline (`HF_HUB_OFFLINE=1`), so no model is ever downloaded by the app. |
+| **Network** | Only `127.0.0.1`: Ollama (port 11434), LM Studio (port 1234), and one `GET /v1/models` to each other program listening on a local port (1024–49151) to see whether it is an LLM server; one that isn't is not asked again. The Hugging Face library runs offline (`HF_HUB_OFFLINE=1`), so no model is ever downloaded by the app. |
 | **Your voice** | Kept in memory during the dictation, never written to disk (unless you run it from a terminal with `--debug`, see [Development](#development)). |
-| **Dictated text** | Typed or pasted into your app, shown in the menu's status line, never written to disk. The clipboard is used for the paste and then restored. |
+| **Dictated text** | Typed or pasted into your app, shown in the menu's status line, never written to disk. The clipboard is used for the paste, marked as transient so clipboard managers skip it, and then restored. |
 | **Files it writes** | Menu choices: `~/Library/Preferences/com.riccardoroselli.stt-clean.plist`. Glossary: `config/glossary.txt`. Log of the current run (status and errors, no dictated text): `logs/stt-clean.log`, overwritten at each launch. |
 
 ## Troubleshooting
@@ -162,7 +172,9 @@ rather than to Python.
 | The live text or the final text never appears | Turn STT-Clean on in System Settings → Privacy & Security → Accessibility. The menu's status line warns about this. |
 | The app does nothing when opened, and the project is on an external drive | Allow STT-Clean in Privacy & Security → Files & Folders → Removable Volumes. |
 | "No speech model found" | Download one ([Models](#models)), then pick it in the menu → Speech. |
-| "Ollama isn't running" | Open Ollama (or LM Studio), or turn Smart clean-up off. |
+| "Ollama isn't running" | Click the ⚠️ **Start Ollama** item in the menu, or turn Smart clean-up off. |
+| The microphone gives only silence | Allow STT-Clean in Privacy & Security → Microphone (the menu's ⚠️ item opens it). |
+| A shortcut does nothing | Another app holds it (the menu says so): pick another one in Menu → Shortcut. |
 | A model "didn't work" | It answered instead of refining, or thought too long. Pick another; `gemma4:12b-mlx` passes all checks. |
 | Anything else | Read `logs/stt-clean.log`. |
 
@@ -175,12 +187,14 @@ models stay where they are.
 
 ## Limitations
 
-- Dictation starts and stops with a mouse click; there is no keyboard shortcut, and Esc only cancels.
+- The start/stop shortcut is one of four fixed combinations; there is no hold-to-talk.
 - Secure input fields (passwords, terminals with Secure Keyboard Entry) block typing and pasting.
 - Chrome and Electron apps (VS Code) don't report their focused text field, so switching tabs inside
   one of their windows during a dictation isn't detected.
-- A clipboard manager that reads the clipboard before the target app counts as the paste, so the
-  old clipboard can come back too early.
+- A clipboard manager that ignores the transient mark and reads the clipboard before the target app
+  counts as the paste, so the old clipboard can come back too early.
+- A sentence the live draft has finished is not transcribed again, so its punctuation can differ
+  slightly from a whole-clip transcript (measured on 25–70 s clips: same words, a few commas).
 - The LLM rewrites the whole text: long dictations take ~1 s per 20–25 words. Turn Smart clean-up off
   for raw speed.
 - Voice commands work as phrased in the prompt (`SYSTEM_PROMPT` in `src/cleanup.py`); there is no
@@ -195,10 +209,11 @@ src/                   The app (Python, ~1180 lines)
   stt.py               Speech engines (Parakeet, Whisper on MLX); finds the models on this Mac
   menubar.py           Menu-bar icon, menu, Speech/LLM lists, switches, saved choices, status line
   audio.py             Mic stream opened per recording, resampling, sounds
-  live.py              Live-draft logic: which words to type, minimal erase/append diff
+  hfcache.py           Lists the models in the Hugging Face cache
+  live.py              Live-draft logic: finished sentences, which words to type, minimal erase/append diff
   output.py            Keystrokes, focus check (app/window/field), clipboard save/restore, ⌘V
-  esc_key.py           Esc as a global hot key while recording (no extra permission)
-  cleanup.py           LLM client (Ollama, LM Studio), system prompt, glossary, fallbacks
+  hotkey.py            Global hot keys without extra permission: Esc while recording, the start/stop shortcut
+  cleanup.py           LLM client (Ollama, LM Studio, any local server), system prompt, styles, glossary, fallbacks
   requirements.txt     Pinned dependencies
 
 macos/                 App bundle: build_app.sh, launcher.c, Info.plist, AppIcon.icns, make_icon.py

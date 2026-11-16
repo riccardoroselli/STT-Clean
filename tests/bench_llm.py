@@ -29,7 +29,7 @@ Python
 GitHub: git hub
 """
 
-# (name, dictated text, check(output) -> bool)
+# (name, dictated text, check(output) -> bool[, the menu's Style, default "clean"])
 CASES = [
     ("correction-it", "Ci vediamo martedì alle cinque, no cancella, mercoledì alle cinque.",
      lambda o: "mercoledì" in o and "martedì" not in o and "cancella" not in o),
@@ -74,6 +74,17 @@ CASES = [
      "dei professori e dei corsi, no cancella, con i nomi dei corsi e degli strumenti che uso, tipo o lama e emme "
      "elle ics.",
      lambda o: "professori" not in o and "cancella" not in o and "Ollama" in o and "MLX" in o),
+    ("style-formal", "Ciao Marco, guarda, domani non ce la faccio proprio a venire alla riunione, ci sentiamo dopo.",
+     lambda o: "Marco" in o and "riunione" in o and "guarda" not in o and "non ce la faccio proprio" not in o
+     and len(o) < 250, "formal"),
+    ("style-bullets", "Per la cena servono tre cose. Il pane, il vino rosso e un dolce al cioccolato.",
+     lambda o: sum(line.startswith("- ") for line in o.splitlines()) >= 3 and "vino rosso" in o, "bullets"),
+    ("style-english", "Domani mattina vado in ufficio presto perché ho una riunione con il cliente.",
+     lambda o: "office" in o and "meeting" in o and "riunione" not in o, "english"),
+    ("style-english-correction", "Ci vediamo martedì alle cinque, no cancella, mercoledì alle cinque.",
+     lambda o: "Wednesday" in o and "Tuesday" not in o and "cancel" not in o.lower(), "english"),
+    ("style-english-already", "Send the report to Luca by Friday, actually no, by Thursday.",
+     lambda o: "Thursday" in o and "Friday" not in o and "report" in o, "english"),
 ]
 
 
@@ -87,9 +98,9 @@ def bench(model: str, glossary: Glossary) -> int:
     c.warm_up()
     print(f"\n#### {model}  (load + warm-up {time.perf_counter() - t0:.1f}s)")
     failures = 0
-    for name, text, ok in CASES:
+    for name, text, ok, *style in CASES:
         t0 = time.perf_counter()
-        out = c.clean(glossary.apply(text))
+        out = c.clean(glossary.apply(text), style=(style or ["clean"])[0])
         dt = time.perf_counter() - t0
         good = out is not None and ok(out)
         failures += not good

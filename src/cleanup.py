@@ -2,27 +2,48 @@
 
 The LLM runs in any local server found on this Mac, picked in the menu's LLM list: Ollama (its own
 API), LM Studio, and whatever else listens on a local port and speaks the OpenAI-style API
-(llama.cpp, mlx-lm, Jan, vLLM, ...). The model is unloaded on exit where the server allows it
-(Ollama, LM Studio).
+(llama.cpp, mlx-lm, Jan, vLLM, ...). Or with no server at all ("Built in"): if mlx-lm is installed,
+STT-Clean runs its server itself, as a child process, for an LLM from the Hugging Face cache.
+The model is unloaded on exit where the server allows it (Ollama, LM Studio, built in).
 The LLM pass handles what speech-to-text can't: self-corrections ("no cancella", "anzi",
 "scratch that"), spoken formatting ("virgola", "a capo"), glossary spellings, and
 instructions at the end of a dictation ("scrivilo in inglese").
 Any failure (server down, timeout, implausible output) returns None so the caller
 pastes the raw text instead. Only the standard library is used.
 """
+import importlib.util
 import json
 import os
 import re
+import socket
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+import hfcache
+
 DEFAULT_LLM = "gemma4:12b-mlx"
-# provider -> (label, URL): the two servers with an API of their own (thinking off, unload). Any other
-# local server is the provider "port:<n>" and speaks the OpenAI-style API at 127.0.0.1:<n>/v1.
-SERVERS = {"ollama": ("Ollama", "http://127.0.0.1:11434"), "lmstudio": ("LM Studio", "http://127.0.0.1:1234/v1")}
+# provider -> (label, URL): the two servers with an API of their own (thinking off, unload), and "mlx",
+# the mlx-lm server STT-Clean runs itself (URL set when it starts). Any other local server is the
+# provider "port:<n>" and speaks the OpenAI-style API at 127.0.0.1:<n>/v1.
+SERVERS = {"ollama": ("Ollama", "http://127.0.0.1:11434"), "lmstudio": ("LM Studio", "http://127.0.0.1:1234/v1"),
+           "mlx": ("Built in (mlx-lm)", "")}
+# The built-in server: mlx-lm's own, in a child process that quits with STT-Clean even if that is killed.
+MLX_MAIN = "from mlx_lm import cli; cli.main()"
+MLX_SERVE = """import os, sys, threading, time
+parent = os.getppid()
+def watch():
+    while os.getppid() == parent:
+        time.sleep(1)
+    os._exit(0)
+threading.Thread(target=watch, daemon=True).start()
+sys.argv = ["mlx_lm", "server", *sys.argv[1:]]
+"""
+MLX_FILES = ["config.json", "model.safetensors.index.json", "tokenizer_config.json"]   # mlx-lm's own test for "an LLM"
 START = {"ollama": ["open", "-ga", "Ollama"],       # how to start a server that isn't running
          "lmstudio": [os.path.expanduser("~/.lmstudio/bin/lms"), "server", "start"]}
 NUM_CTX = 4096   # keep identical in every request, otherwise Ollama reloads the model
@@ -140,6 +161,8 @@ class Cleaner:
         # thinking off (it would spend the output budget): reasoning_effort (OpenAI style) and
         # chat_template_kwargs (Qwen3 & co.). Dropped if the server rejects them.
         self.no_think = {"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}}
+        self.thinking = 0     # extra output tokens for a model that thinks anyway (deepseek-r1): set when seen
+        self.process = None   # provider "mlx": the server we run
 
     def _post(self, path: str, body: dict | None, timeout: float, base: str = "") -> dict:
         """POST `body` as JSON (GET if None) to `base` (default: the server URL) + `path`, return the JSON reply."""
@@ -154,6 +177,8 @@ class Cleaner:
 
     def models(self, timeout: float) -> list[str]:
         """Names of the chat models on the server (raises if it doesn't answer)."""
+        if self.provider == "mlx":
+            return mlx_models()
         if self.provider == "ollama":
             names = [m["name"] for m in self._post("/api/tags", None, timeout).get("models", [])]
         else:
@@ -191,25 +216,31 @@ class Cleaner:
         """Cleaned text in the menu's `style`, or None on any failure (caller falls back to raw)."""
         self.glossary.maybe_reload()
         messages = [{"role": "system", "content": self.system_prompt(style)}, {"role": "user", "content": raw}]
-        budget = len(raw) // 2 + 64                     # output tokens: enough for the text, not for an essay
+        budget = len(raw) // 2 + 64 + self.thinking     # output tokens: enough for the text, not for an essay
+        timeout = timeout or self.timeout + len(raw) / 40 + self.thinking / 30
         try:
             if self.provider == "ollama":
                 d = self._post("/api/chat", {
                     "model": self.model, "stream": False, "think": False, "keep_alive": -1, "messages": messages,
                     "options": {"temperature": 0, "num_ctx": NUM_CTX, "num_predict": budget},
-                }, timeout=timeout or self.timeout + len(raw) / 40)
-                reply, end = d["message"]["content"], d.get("done_reason")
+                }, timeout)
+                message, end = d["message"], d.get("done_reason")
             else:
                 body = {"model": self.model, "temperature": 0, "max_tokens": budget, "messages": messages}
                 try:
-                    d = self._post("/chat/completions", {**body, **self.no_think}, timeout or self.timeout + len(raw) / 40)
+                    d = self._post("/chat/completions", {**body, **self.no_think}, timeout)
                 except urllib.error.HTTPError as e:
                     if e.code != 400 or not self.no_think:
                         raise
-                    d = self._post("/chat/completions", body, timeout or self.timeout + len(raw) / 40)
+                    d = self._post("/chat/completions", body, timeout)
                     self.no_think = {}                  # the plain request worked: a strict server, plain from now on
-                reply, end = d["choices"][0]["message"]["content"], d["choices"][0].get("finish_reason")
+                message, end = d["choices"][0]["message"], d["choices"][0].get("finish_reason")
+            reply = message.get("content") or ""
             if end == "length":                         # hit the budget: the end of the text is missing
+                thought = any(message.get(k) for k in ("thinking", "reasoning", "reasoning_content")) or "<think>" in reply
+                if thought and not self.thinking:       # it thinks although told not to: once more, with room for it
+                    self.thinking = 2048
+                    return self.clean(raw, timeout + self.thinking / 30, style)
                 raise ValueError("output cut off")
             out = strip_wrapping(raw, reply)
         except Exception as e:
@@ -220,12 +251,46 @@ class Cleaner:
             return None
         return out
 
+    def serve(self, wait: float = 180) -> bool:
+        """Built in: start mlx-lm's server with our model on a free port and wait until it is loaded."""
+        if self.process and self.process.poll() is None:
+            return True
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}/v1"
+        with tempfile.TemporaryFile() as log:           # its errors; a pipe nobody reads would fill up and block it
+            self.process = subprocess.Popen(
+                [sys.executable, "-c", MLX_SERVE + MLX_MAIN, "--model", self.model, "--port", str(port), "--log-level",
+                 "WARNING", "--chat-template-args", '{"enable_thinking": false}'], stdout=subprocess.DEVNULL, stderr=log)
+            end = time.monotonic() + wait
+            while time.monotonic() < end and self.process.poll() is None:
+                try:
+                    self._post("/health", None, 1, f"http://127.0.0.1:{port}")
+                    return True
+                except Exception:
+                    time.sleep(0.3)
+            self.unload()
+            log.seek(0)
+            why = log.read().decode(errors="replace").strip().splitlines() or ["no answer"]
+        self.last_error = f"the built-in server didn't start: {why[-1]}"
+        return False
+
     def warm_up(self) -> bool:
         """Load the model (cold load can take ~10 s) and prime its prompt cache; True if it worked."""
+        if self.provider == "mlx" and not self.serve():
+            return False
         return self.clean("Prova.", timeout=60) is not None
 
     def unload(self) -> None:
-        """Free the model's RAM: Ollama's keep_alive 0, or LM Studio's own REST API."""
+        """Free the model's RAM: Ollama's keep_alive 0, LM Studio's own REST API, or stop the built-in server."""
+        if self.process:
+            self.process.terminate()
+            try:
+                self.process.wait(5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+            self.process = None
         try:
             if self.provider == "ollama":
                 self._post("/api/generate", {"model": self.model, "keep_alive": 0}, timeout=3)
@@ -240,6 +305,14 @@ class Cleaner:
         except Exception:                               # server gone: nothing to free
             pass
 
+
+
+def mlx_models() -> list[str]:
+    """The LLMs in the Hugging Face cache that the built-in server can run (none without mlx-lm)."""
+    if not importlib.util.find_spec("mlx_lm"):
+        return []
+    return [repo for repo, folder, _ in hfcache.configs()
+            if all(os.path.exists(os.path.join(folder, f)) for f in MLX_FILES)]
 
 
 def local_ports() -> list[tuple[int, str]]:
@@ -270,7 +343,7 @@ def available() -> list[tuple[str, str, list[str]]]:
     """(label, provider, models) for each local LLM server that answers now: Ollama, LM Studio and
     any other program listening on a local port that lists models the OpenAI way.
     Their models are a click away in the menu's LLM list."""
-    known = {int(url.split(":")[2].split("/")[0]) for _, url in SERVERS.values()}
+    known = {int(url.split(":")[2].split("/")[0]) for _, url in SERVERS.values() if url}
     others = [(port, program) for port, program in local_ports() if port not in known and (port, program) not in _not_llm]
     servers = [(label, provider) for provider, (label, _) in SERVERS.items()]
     servers += [(f"{program} (port {port})", f"port:{port}") for port, program in others]
