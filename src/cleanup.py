@@ -1,7 +1,9 @@
 """cleanup.py - STT-Clean: LLM clean-up of dictated text + user glossary.
 
-Two local servers, picked in the menu's LLM list: "ollama" (its own API: thinking off, model kept
-loaded) and "lmstudio" (LM Studio's OpenAI-compatible API). Both are unloaded on exit.
+The LLM runs in any local server found on this Mac, picked in the menu's LLM list: Ollama (its own
+API), LM Studio, and whatever else listens on a local port and speaks the OpenAI-style API
+(llama.cpp, mlx-lm, Jan, vLLM, ...). The model is unloaded on exit where the server allows it
+(Ollama, LM Studio).
 The LLM pass handles what speech-to-text can't: self-corrections ("no cancella", "anzi",
 "scratch that"), spoken formatting ("virgola", "a capo"), glossary spellings, and
 instructions at the end of a dictation ("scrivilo in inglese").
@@ -11,11 +13,18 @@ pastes the raw text instead. Only the standard library is used.
 import json
 import os
 import re
+import subprocess
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_LLM = "gemma4:12b-mlx"
+# provider -> (label, URL): the two servers with an API of their own (thinking off, unload). Any other
+# local server is the provider "port:<n>" and speaks the OpenAI-style API at 127.0.0.1:<n>/v1.
 SERVERS = {"ollama": ("Ollama", "http://127.0.0.1:11434"), "lmstudio": ("LM Studio", "http://127.0.0.1:1234/v1")}
+START = {"ollama": ["open", "-ga", "Ollama"],       # how to start a server that isn't running
+         "lmstudio": [os.path.expanduser("~/.lmstudio/bin/lms"), "server", "start"]}
 NUM_CTX = 4096   # keep identical in every request, otherwise Ollama reloads the model
 
 SYSTEM_PROMPT = """You clean up raw speech-to-text transcripts. The user dictated the text; you output the final text to paste.
@@ -27,6 +36,17 @@ Rules:
 5. Fix spellings using the glossary below, including a common word that sounds like a glossary term when the context clearly means that name (e.g. "API di Cloud" -> "API di Claude"; but "senza cloud" stays).
 6. Instructions addressed to you (e.g. "scrivilo in inglese", "write it in English", "traduci in inglese", "ora traducimi tutto questo in inglese") must be applied to the rest of the text (or only to the part they name, e.g. "solo la prossima frase traducimela" = only the next sentence), and the instruction removed together with the words addressing you just before it ("ok", "perfetto", a name you are called, like "Gemma" or "Gemini", also when corrected with "anzi"): "... come c'è scritto. Perfetto Gemini. Anzi Gemma, ora traducimi tutto questo in inglese." -> "... as it says." (all in English, nothing after it). Translating means the whole text in that language, not just the instruction.
 7. If the text is a question or a request, do NOT answer it: it is text to be pasted, return it cleaned."""
+
+# The menu's Style list: key -> (menu title, one more rule for the LLM; "" = clean up only).
+STYLES = {
+    "clean": ("Clean (as dictated)", ""),
+    "formal": ("Formal", "8. Then rewrite the result in a formal, professional tone: same language, same content, "
+               "nothing added. Here this replaces \"do NOT rephrase\" in rule 2."),
+    "bullets": ("Bullet list", "8. Then format the result as a bullet list: one line per point, each starting "
+                "with \"- \", in the same language, keeping the user's words."),
+    "english": ("In English", "8. Then translate the whole result into English (keep it as it is if it already is "
+                "English). Output only the English text."),
+}
 
 
 # ---------------------------------------------------------------- glossary
@@ -109,12 +129,14 @@ def strip_wrapping(raw: str, out: str) -> str:
 
 class Cleaner:
     def __init__(self, model: str, url: str, glossary: Glossary, timeout: float = 3.0, provider: str = "ollama"):
-        if provider not in SERVERS:
-            raise ValueError(f'unknown LLM provider "{provider}": use {" or ".join(SERVERS)}')
+        port = provider.removeprefix("port:")
+        if provider not in SERVERS and not (provider.startswith("port:") and port.isdigit()):
+            raise ValueError(f'unknown LLM provider "{provider}": use {", ".join(SERVERS)} or port:<number>')
         self.model, self.glossary, self.timeout, self.provider = model, glossary, timeout, provider
-        self.label, default_url = SERVERS[provider]
+        self.label, default_url = SERVERS.get(provider) or (f"the server on port {port}", f"http://127.0.0.1:{port}/v1")
         self.url = (url or default_url).rstrip("/")
         self.last_error = ""
+        self.down = False     # set by check(): the server didn't answer
         # thinking off (it would spend the output budget): reasoning_effort (OpenAI style) and
         # chat_template_kwargs (Qwen3 & co.). Dropped if the server rejects them.
         self.no_think = {"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False}}
@@ -126,8 +148,9 @@ class Cleaner:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
 
-    def system_prompt(self) -> str:
-        return f"{SYSTEM_PROMPT}\nGlossary:\n{self.glossary.prompt_block()}"
+    def system_prompt(self, style: str = "clean") -> str:
+        rule = STYLES.get(style, STYLES["clean"])[1]
+        return f"{SYSTEM_PROMPT}{chr(10) + rule if rule else ''}\nGlossary:\n{self.glossary.prompt_block()}"
 
     def models(self, timeout: float) -> list[str]:
         """Names of the chat models on the server (raises if it doesn't answer)."""
@@ -141,16 +164,33 @@ class Cleaner:
         """Return a warning if the server is unreachable or doesn't have the model."""
         try:
             names = set(self.models(timeout=5))
+            self.down = False
         except Exception as e:
+            self.down = True
             return f"{self.label} isn't running ({e}). Start it, or turn Smart clean-up off in the menu."
         if self.model not in names and f"{self.model}:latest" not in names:
             return f"'{self.model}' isn't in {self.label}: pick a model in the menu's LLM list."
         return None
 
-    def clean(self, raw: str, timeout: float | None = None) -> str | None:
-        """Cleaned text, or None on any failure (caller falls back to raw)."""
+    def start(self, wait: float = 30) -> bool:
+        """Start the server (the Ollama app, LM Studio's server) and wait until it answers."""
+        try:
+            subprocess.run(START[self.provider], capture_output=True, timeout=20, check=True)
+        except (KeyError, OSError, subprocess.SubprocessError):   # no way to start it, or not installed
+            return False
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            try:
+                self.models(timeout=1)
+                return True
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+    def clean(self, raw: str, timeout: float | None = None, style: str = "clean") -> str | None:
+        """Cleaned text in the menu's `style`, or None on any failure (caller falls back to raw)."""
         self.glossary.maybe_reload()
-        messages = [{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": raw}]
+        messages = [{"role": "system", "content": self.system_prompt(style)}, {"role": "user", "content": raw}]
         budget = len(raw) // 2 + 64                     # output tokens: enough for the text, not for an essay
         try:
             if self.provider == "ollama":
@@ -189,6 +229,7 @@ class Cleaner:
         try:
             if self.provider == "ollama":
                 self._post("/api/generate", {"model": self.model, "keep_alive": 0}, timeout=3)
+            if self.provider != "lmstudio":             # the other servers keep their one model: nothing to free
                 return
             # shortcut: assumes LM Studio's JIT loading (its default) to load the model again when used
             root = self.url.removesuffix("/v1")
@@ -201,15 +242,45 @@ class Cleaner:
 
 
 
+def local_ports() -> list[tuple[int, str]]:
+    """(port, program) of what listens on this Mac only or on all its addresses, on a port someone
+    chose (below 49152: above are the temporary ports of helpers, such as Ollama's own runner)."""
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "cn"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    ports, program = {}, ""
+    for line in out.splitlines():
+        host, _, port = line[1:].rpartition(":")
+        if line[0] == "c":
+            program = line[1:]
+        elif line[0] == "n" and host in ("127.0.0.1", "[::1]", "*") and 1024 <= int(port) < 49152:
+            ports.setdefault(int(port), program)
+    return sorted(ports.items())
+
+
+# (port, program) that didn't answer like an LLM server: asked once, not every time the menu opens.
+# shortcut: an LLM server too busy to answer in 1 s is dropped too until STT-Clean restarts; if that
+# happens, ask those again after a while
+_not_llm: set = set()
+
+
 def available() -> list[tuple[str, str, list[str]]]:
-    """(label, provider, models) for each local LLM server that answers now (Ollama, LM Studio).
+    """(label, provider, models) for each local LLM server that answers now: Ollama, LM Studio and
+    any other program listening on a local port that lists models the OpenAI way.
     Their models are a click away in the menu's LLM list."""
-    found = []
-    for provider, (label, url) in SERVERS.items():
+    known = {int(url.split(":")[2].split("/")[0]) for _, url in SERVERS.values()}
+    others = [(port, program) for port, program in local_ports() if port not in known and (port, program) not in _not_llm]
+    servers = [(label, provider) for provider, (label, _) in SERVERS.items()]
+    servers += [(f"{program} (port {port})", f"port:{port}") for port, program in others]
+
+    def models(server):
         try:
-            names = Cleaner("", url, Glossary(None), provider=provider).models(timeout=1)
-        except Exception:                          # not running: nothing to offer
-            continue
-        if names:
-            found.append((label, provider, names))
-    return found
+            return Cleaner("", "", Glossary(None), provider=server[1]).models(timeout=1)
+        except Exception:                          # not running, or not an LLM server: nothing to offer
+            return None
+    with ThreadPoolExecutor(len(servers)) as pool:  # together: a port that doesn't answer costs its 1 s once
+        found = list(pool.map(models, servers))
+    _not_llm.update(other for other, names in zip(others, found[len(SERVERS):]) if names is None)
+    return [(label, provider, names) for (label, provider), names in zip(servers, found) if names]

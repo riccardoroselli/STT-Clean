@@ -9,12 +9,13 @@ in use has to be installed.
     parakeet  NVIDIA Parakeet TDT with parakeet-mlx (default)
     whisper   OpenAI Whisper family with mlx-whisper (install.sh adds it without PyTorch)
 """
-import glob
 import importlib.util
 import os
 import sys
 
 import numpy as np
+
+import hfcache
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")   # use the models already on this Mac, never download one
 
@@ -29,18 +30,21 @@ PACKAGES = {"parakeet": "parakeet_mlx", "whisper": "mlx_whisper"}
 WEIGHTS = {"parakeet": ["model.safetensors"], "whisper": ["weights.safetensors", "weights.npz"]}   # MLX formats
 
 
+def engine_of(config: dict) -> str:
+    """The engine that loads a model with this config.json ("" = not a speech model we can run).
+    By content, not by repo name: fine-tunes and renamed copies are found too."""
+    if str(config.get("target", "")).startswith("nemo.collections.asr.models"):
+        return "parakeet"     # NVIDIA NeMo transducer / CTC models (Parakeet TDT, RNNT, CTC)
+    if "n_audio_state" in config and "n_mels" in config:
+        return "whisper"      # mlx-whisper's own format (not Transformers' openai/whisper-*)
+    return ""
+
+
 def available() -> list[tuple[str, str]]:
     """(engine, model) for each model in the Hugging Face cache that its installed engine can load."""
-    hub = os.environ.get("HF_HUB_CACHE") or os.path.join(
-        os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub")
-    found = []
-    for folder in sorted(glob.glob(os.path.join(hub, "models--*"))):
-        repo = os.path.basename(folder)[len("models--"):].replace("--", "/", 1)
-        for engine, package in PACKAGES.items():
-            if (engine in repo.lower() and importlib.util.find_spec(package)
-                    and any(glob.glob(os.path.join(folder, "snapshots", "*", w)) for w in WEIGHTS[engine])):
-                found.append((engine, repo))
-    return found
+    return [(engine, repo) for repo, folder, config in hfcache.configs()
+            if (engine := engine_of(config)) and importlib.util.find_spec(PACKAGES[engine])
+            and any(os.path.exists(os.path.join(folder, w)) for w in WEIGHTS[engine])]
 
 
 def text(sentences: list) -> str:

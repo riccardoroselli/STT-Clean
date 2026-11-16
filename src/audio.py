@@ -1,6 +1,5 @@
 """audio.py - the microphone (open only while recording), resampling, and the start/stop sounds."""
 import os
-import queue
 import subprocess
 
 import numpy as np
@@ -16,9 +15,9 @@ def play(path: str) -> None:
         subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def open_mic(sr: int, events: queue.Queue) -> tuple:
-    """Started stream on the current default mic, (stream, its rate); every 50 ms block goes to
-    `events` as ("audio", samples). Opened per recording, not at launch: an always-open mic keeps
+def open_mic(sr: int, heard) -> tuple:
+    """Started stream on the current default mic, (stream, its rate); heard(samples) gets every
+    50 ms block (on the audio thread). Opened per recording, not at launch: an always-open mic keeps
     the orange privacy dot on and AirPods in call quality, and a stream whose device went away
     (AirPods back in the case) stops without any error."""
     sd._terminate()           # PortAudio reads the device list once: re-read it for mics plugged in / removed since
@@ -26,7 +25,7 @@ def open_mic(sr: int, events: queue.Queue) -> tuple:
 
     def opened(rate: int):
         return sd.InputStream(samplerate=rate, channels=1, dtype="float32", blocksize=int(rate * 0.05),
-                              callback=lambda indata, *_: events.put(("audio", indata[:, 0].copy())))
+                              callback=lambda indata, *_: heard(indata[:, 0].copy()))
     try:
         rate = sr
         stream = opened(rate)

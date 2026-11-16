@@ -20,6 +20,7 @@ This file: the options and the worker loop.
 import argparse
 import atexit
 import os
+import queue
 import shutil
 import signal
 import sys
@@ -36,10 +37,11 @@ from audio import SOUND_CANCEL, SOUND_START, SOUND_STOP, play, resample
 import cleanup
 from cleanup import DEFAULT_LLM, Cleaner, Glossary
 from live import Tail, advance
-from menubar import GLOSSARY, ROOT, MenuBar, status
+from menubar import GLOSSARY, ROOT, MenuBar, problem, status
 from output import can_post, copy, paste, retype
 
 MIN_SECONDS = 0.3         # shorter clicks are ignored
+IDLE_UNLOAD = 600         # seconds without a dictation before the LLM's memory (~8 GB) is freed
 
 
 def save_debug(audio: np.ndarray, drafts: list) -> None:
@@ -90,8 +92,9 @@ def work(args, ui: MenuBar) -> None:
     warnings = []             # shown after Ready, so they stay in the menu's status line
     glossary = Glossary(GLOSSARY)
     provider, model = s["llm_provider"], s["llm_model"]
+    # the local LLM servers (also here so the first menu doesn't wait for ports that don't answer)
+    found = [(p, n) for _, p, names in cleanup.available() for n in names]
     if not model:             # nothing picked yet: the recommended model if installed, else the first one found
-        found = [(p, n) for _, p, names in cleanup.available() for n in names]
         provider, model = ("ollama", DEFAULT_LLM) if not found or ("ollama", DEFAULT_LLM) in found else found[0]
     cleaner = Cleaner(model, "", glossary, provider=provider)
     ui.current_llm = (provider, model)
@@ -100,12 +103,44 @@ def work(args, ui: MenuBar) -> None:
     def llm_name() -> str:
         return f"{cleaner.model} ({cleaner.label})"
 
-    def llm_error() -> str | None:
-        """Check the server and load the model; why it can't be used, or None."""
-        if warning := cleaner.check():
+    loaded = False            # the LLM is in memory
+    warming = None            # thread loading it again while a dictation is recorded
+
+    def settle() -> None:
+        """Wait for a load started by a dictation: one request at a time to the LLM."""
+        nonlocal warming
+        if warming:
+            warming.join()
+            warming = None
+
+    def warm() -> None:
+        nonlocal loaded
+        loaded = cleaner.warm_up()
+
+    def llm_error(wait: bool = True) -> str | None:
+        """Check the server and load the model; why it can't be used, or None. wait=False: it loads
+        in the background, and the first clean-up waits for it."""
+        nonlocal warming
+        settle()
+        warning = cleaner.check()
+        # a server that isn't running gets a menu item that starts it
+        problem("llm", f"⚠️  Start {cleaner.label} (for the smart clean-up)"
+                if warning and cleaner.down and cleaner.provider in cleanup.START else "")
+        if warning:
             return warning
+        if not wait:
+            warming = threading.Thread(target=warm, daemon=True)
+            warming.start()
+            return None
         status(f"Loading {llm_name()} ...")
-        return None if cleaner.warm_up() else f"LLM warm-up failed: {cleaner.last_error}"
+        warm()
+        return None if loaded else f"LLM warm-up failed: {cleaner.last_error}"
+
+    def llm_free() -> None:
+        nonlocal loaded
+        settle()
+        cleaner.unload()
+        loaded = False
 
     def load_speech(engine: str, model: str):
         status(f"Loading {model} ({engine}) ...")
@@ -115,7 +150,7 @@ def work(args, ui: MenuBar) -> None:
 
     llm = "off"
     if s["llm"]:
-        error = llm_error()
+        error = llm_error(wait=False)     # it loads while the speech model does: ready sooner
         llm = "unavailable, raw text" if error else llm_name()
         if error:
             warnings.append(f"⚠️  {error} Raw transcript until that's fixed.")
@@ -133,6 +168,7 @@ def work(args, ui: MenuBar) -> None:
     if not transcribe:        # the app stays up: download one, then pick it in the Speech menu
         warnings.append("⚠️  No speech model found on this Mac: download one (see the README), "
                         "then pick it in the menu → Speech.")
+        problem("speech", "⚠️  No speech model: how to get one")
 
     events = ui.events
     ui.current_stt = (engine, stt_model)
@@ -145,6 +181,7 @@ def work(args, ui: MenuBar) -> None:
     if not args.no_paste and not AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
         warnings.append("⚠️  Allow STT-Clean in System Settings → Privacy & Security → Accessibility "
                         "(works as soon as it is on).")
+        problem("access", "⚠️  Allow typing: open the Accessibility setting")
     for warning in warnings:
         status(warning, keep=True)
 
@@ -180,6 +217,7 @@ def work(args, ui: MenuBar) -> None:
         status(f"⚠️  Not typed: {why}. Text copied, paste it with ⌘V.", keep=True)
 
     def finish(audio: np.ndarray) -> None:
+        nonlocal loaded
         status("… transcribing")
         t0 = time.perf_counter()
         text = tail.final(audio)
@@ -194,22 +232,39 @@ def work(args, ui: MenuBar) -> None:
         if ui.settings["llm"]:
             status("✨ cleaning up ...")
             t0 = time.perf_counter()
-            cleaned = cleaner.clean(text)
+            settle()                      # the model may still be loading (it was freed while idle)
+            cleaned = cleaner.clean(text, style=ui.settings["style"])
             dt = time.perf_counter() - t0
+            loaded = cleaned is not None  # if not, the next dictation tries to load it again
             if cleaned is None:
                 status(f"(LLM skipped, raw text pasted: {cleaner.last_error})", keep=True)
             else:
+                problem("llm")            # e.g. its server was started by hand since the warning
                 status(f"✨ [{dt:.2f}s] " + (cleaned.replace("\n", " ⏎ ") if cleaned != text else "(unchanged)"),
                        keep=True, log=False)
                 text = cleaned
         deliver(text)
 
     while True:
-        kind, data = events.get()
+        try:
+            kind, data = events.get(timeout=IDLE_UNLOAD)
+        except queue.Empty:               # idle: free the LLM's memory, the next dictation loads it while you speak
+            if loaded:
+                llm_free()
+                status(f"Idle for {IDLE_UNLOAD // 60} minutes: LLM memory freed (it loads again while you speak).", keep=True)
+            continue
+
+        if kind == "llm_start":           # the menu's "Start Ollama": start the server, then load the model
+            status(f"Starting {cleaner.label} ...")
+            if not cleaner.start():
+                status(f"⚠️  {cleaner.label} didn't start: open it yourself, then click this again.", keep=True)
+                continue
+            kind, data = "llm", True
 
         if kind == "llm":
             if not data:
-                cleaner.unload()          # frees its RAM (~8 GB for a 12B model)
+                llm_free()                # frees its RAM (~8 GB for a 12B model)
+                problem("llm")
                 status("Smart clean-up off: raw transcript (glossary still applied).", keep=True)
             elif error := llm_error():
                 status(f"⚠️  {error} Raw transcript until that's fixed.", keep=True)
@@ -219,10 +274,10 @@ def work(args, ui: MenuBar) -> None:
         elif kind == "llm_model":         # picked in the LLM menu: switch, or stay on the old one if it fails
             provider, model = data
             old = cleaner
-            old.unload()                  # don't hold two models in RAM
+            llm_free()                    # don't hold two models in RAM
             cleaner = Cleaner(model, "", glossary, provider=provider)
             if error := llm_error():
-                cleaner.unload()          # it may have loaded before failing (e.g. it answers instead of cleaning)
+                llm_free()                # it may have loaded before failing (e.g. it answers instead of cleaning)
                 cleaner = old
                 llm_error()
                 status(f"⚠️  {model} didn't work, still using {old.model}: {error}", keep=True)
@@ -241,6 +296,7 @@ def work(args, ui: MenuBar) -> None:
                 transcribe, sr, engine, stt_model = new, new_sr, new_engine, new_model
                 ui.sr, ui.current_stt = sr, data
                 AppHelper.callAfter(ui.save, {"stt": engine, "stt_model": stt_model})
+                problem("speech")
                 status(f"Speech model: {stt_model} ({engine}).", keep=True)
             stt.free_cache()              # the old model's buffers
             ui.ready = transcribe is not None
@@ -251,6 +307,9 @@ def work(args, ui: MenuBar) -> None:
             tail, floor, heard, still = Tail(transcribe, sr), float("inf"), False, False
             capture_sr, target = data
             can_type = not args.no_paste and AXIsProcessTrusted()   # re-checked: may be allowed mid-run
+            problem("access", "" if can_type or args.no_paste else "⚠️  Allow typing: open the Accessibility setting")
+            if ui.settings["llm"] and not loaded and not (warming and warming.is_alive()):
+                llm_error(wait=False)     # freed while idle, or its server wasn't running: load it while you speak
             play(SOUND_START)
             status("● recording ...")
 
@@ -292,9 +351,14 @@ def work(args, ui: MenuBar) -> None:
             audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
             if args.debug:
                 save_debug(audio, drafts)
+            silent = len(audio) > 0 and not audio.any()   # macOS hands out pure silence when the mic isn't allowed
+            problem("mic", "⚠️  Allow the microphone: open its privacy setting" if silent else "")
             try:
                 if len(audio) < MIN_SECONDS * sr:
                     status("(too short, ignored)", keep=True)
+                    erase_draft()
+                elif silent:
+                    status("⚠️  The microphone gave only silence: allow STT-Clean in Privacy & Security → Microphone.", keep=True)
                     erase_draft()
                 else:
                     finish(audio)
