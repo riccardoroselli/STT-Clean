@@ -40,7 +40,7 @@ cd STT-Clean
 ./install.sh
 ```
 
-`install.sh` creates a Python environment in `.venv` inside the folder (59 packages, 0.7 GB, no
+`install.sh` creates a Python environment in `.venv` inside the folder (under 1 GB, no
 models), builds `build/STT-Clean.app` and opens it. When it finishes it tells you if a speech model
 or an LLM is missing, with the command to get one. To use a Python environment you already have
 instead of `.venv`: `STT_CLEAN_PYTHON=/path/to/python ./install.sh`.
@@ -64,7 +64,8 @@ STT-Clean uses the models already on your Mac and checks for new ones every time
 | Kind | Found in | Formats | Picked at launch |
 |---|---|---|---|
 | Speech | The Hugging Face cache: `~/.cache/huggingface/hub`, or `$HF_HOME/hub` if it was set when you ran `install.sh` | Parakeet and Whisper in MLX format (`mlx-community/…`) | Your last pick, else Parakeet TDT 0.6B v3, else the first one found |
-| LLM | Every chat model in [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and any other server running on a local port with the OpenAI-style API (`llama-server`, `mlx_lm.server`, Jan, vLLM, ...) | Any instruct model | Your last pick, else `gemma4:12b-mlx`, else the first one found |
+| LLM in a server | Every chat model in [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and any other server running on a local port with the OpenAI-style API (`llama-server`, `mlx_lm.server`, Jan, vLLM, ...) | Any instruct model | Your last pick, else `gemma4:12b-mlx`, else the first one found |
+| LLM built in | The Hugging Face cache (menu → LLM → **Built in**). STT-Clean runs it itself with [mlx-lm](https://github.com/ml-explore/mlx-lm), no other app needed | Any LLM that mlx-lm supports | Only when you pick it |
 
 Download a speech model with the Hugging Face CLI that `install.sh` put in `.venv`:
 
@@ -77,11 +78,32 @@ Whisper models in other formats are not found: whisper.cpp or MacWhisper `.bin` 
 faster-whisper, OpenAI `.pt` files, Transformers `openai/whisper-*`. Whisper pads every clip to
 30 s, so with large Whisper models the live draft updates less often than with Parakeet.
 
-The LLM is optional; without one you get the raw transcript. For the refinement, install Ollama and
-run `ollama pull gemma4:12b-mlx` (7.7 GB, ~8 GB of RAM while loaded), or download a model in LM
-Studio. The prompt was tuned on Gemma 4: `gemma4:12b-mlx` passes all 16 cases of
-`tests/bench_llm.py`; run it to check another model. Models that answer the text instead of
-refining it fail the check run when you pick them, and the previous model stays.
+The LLM is optional; without one you get the raw transcript. For the refinement, either install
+Ollama and run `ollama pull gemma4:12b-mlx` (7.7 GB, ~8 GB of RAM while loaded), download a model in
+LM Studio, start any other local server, or download an LLM for the built-in server:
+
+```bash
+.venv/bin/hf download mlx-community/gemma-4-12B-it-4bit       # 6.8 GB
+```
+
+A built-in model is loaded by a child process of STT-Clean (mlx-lm's server on a private local
+port) and leaves memory when that process is stopped: when you switch model, turn clean-up off,
+quit, or after 10 idle minutes.
+
+The prompt was tuned on Gemma 4. Results of `tests/bench_llm.py` (21 dictations) on an M4:
+
+| Model (in Ollama) | Passed | Time per dictation |
+|---|---|---|
+| `gemma4:12b-mlx` | 21/21 | 0.6–4.2 s |
+| `gemma4:26b-mlx` | 15/16 ¹ | 0.6–3.5 s |
+| `qwen3.8` (27B) | 15/16 ¹ | 12–23 s |
+| `SparkLLM/Spark-X2.5-4B` | 14/21 | 1.1–10 s |
+
+¹ Measured on the 16 cases without the styles.
+
+Run it to check another model. A model that answers the text instead of refining it fails the
+check run when you pick it, and the previous model stays. A reasoning model that cannot switch
+its thinking off (deepseek-r1) works, but each dictation waits for its thoughts.
 
 ## Usage
 
@@ -204,7 +226,7 @@ models stay where they are.
 
 ```
 install.sh             One-step install: Python packages in .venv, then the app
-src/                   The app (Python, ~1180 lines)
+src/                   The app (Python, ~1600 lines)
   stt_clean.py         Entry point and worker loop: record → live draft → final → refine → paste
   stt.py               Speech engines (Parakeet, Whisper on MLX); finds the models on this Mac
   menubar.py           Menu-bar icon, menu, Speech/LLM lists, switches, saved choices, status line
@@ -217,7 +239,7 @@ src/                   The app (Python, ~1180 lines)
   requirements.txt     Pinned dependencies
 
 macos/                 App bundle: build_app.sh, launcher.c, Info.plist, AppIcon.icns, make_icon.py
-tests/                 31 unit tests, LLM benchmark, end-to-end and typing checks
+tests/                 46 unit tests, LLM benchmark, end-to-end and typing checks
 assets/                Logo and 1024 px app icon
 ```
 
@@ -227,9 +249,9 @@ assets/                Logo and 1024 px app icon
 
 ```bash
 .venv/bin/python src/stt_clean.py --no-paste    # run from a terminal: log there, text printed, not typed
-.venv/bin/python -m unittest discover tests     # 31 unit tests: live-draft logic, glossary, LLM servers, engines, settings
-.venv/bin/python tests/bench_llm.py [model ...] # 16 dictations through the LLM picked in the menu, exit 1 on a failure
-.venv/bin/python tests/e2e_pipeline.py          # macOS `say` → speech model → LLM, no mic
+.venv/bin/python -m unittest discover tests     # 46 unit tests: live-draft logic, glossary, LLM servers, built-in server, engines, hot keys, settings
+.venv/bin/python tests/bench_llm.py [model ...] # 21 dictations through the LLM picked in the menu, exit 1 on a failure
+.venv/bin/python tests/e2e_pipeline.py          # macOS `say` → the real worker loop (live draft, LLM, style, idle unload), no mic
 .venv/bin/python tests/typing_check.py          # replays heavy live-draft churn into TextEdit (takes the keyboard ~15 s)
 ```
 

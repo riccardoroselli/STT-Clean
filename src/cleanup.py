@@ -61,10 +61,12 @@ Rules:
 # The menu's Style list: key -> (menu title, one more rule for the LLM; "" = clean up only).
 STYLES = {
     "clean": ("Clean (as dictated)", ""),
-    "formal": ("Formal", "8. Then rewrite the result in a formal, professional tone: same language, same content, "
-               "nothing added. Here this replaces \"do NOT rephrase\" in rule 2."),
-    "bullets": ("Bullet list", "8. Then format the result as a bullet list: one line per point, each starting "
-                "with \"- \", in the same language, keeping the user's words."),
+    "formal": ("Formal", "8. Formal style: the text you output is the cleaned text rewritten in a formal, professional "
+               "tone (same language, same meaning, nothing added). Never output the informal version. This replaces "
+               "\"do NOT rephrase\" in rule 2."),
+    "bullets": ("Bullet list", "8. Bullet-list style: the text you output is a list. Every item, step or point goes on "
+                "its own line starting with \"- \"; when one sentence enumerates several things (\"a, b and c\"), "
+                "each thing gets its own line. Same language, the user's words."),
     "english": ("In English", "8. Then translate the whole result into English (keep it as it is if it already is "
                 "English). Output only the English text."),
 }

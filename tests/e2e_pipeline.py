@@ -98,19 +98,19 @@ def main() -> None:
         print(f"{'✓' if ok else '✗'} {name}\n")
 
     raw, out, drafts = dictate(ui, "Ci vediamo martedì alle cinque, no cancella, mercoledì alle sei.")
-    check("self-correction, with live drafts", "mercoledì" in out and "martedì" not in out and drafts >= 2)
+    check("self-correction", "mercoledì" in out and "martedì" not in out)   # (the LLM may still be loading here)
     raw, out, _ = dictate(ui, "Domani mando la relazione al professore. Scrivilo in inglese.")
     check("spoken instruction: translated", "professor" in out and "relazione" not in out)
     ui.settings["style"] = "bullets"
-    raw, out, _ = dictate(ui, "Per la cena servono tre cose. Il pane, il vino rosso e un dolce al cioccolato.")
-    check("style from the menu: bullet list", out.count("\n- ") >= 2 and "vino" in out)
+    raw, out, drafts = dictate(ui, "Per la cena servono tre cose. Il pane, il vino rosso e un dolce al cioccolato.")
+    check("style from the menu: bullet list, with live drafts", out.count("\n- ") >= 2 and "vino" in out and drafts >= 2)
     ui.settings["style"] = "clean"
 
     stt_clean.IDLE_UNLOAD, since = 2, len(said)       # idle: the LLM is freed, then loads again while speaking
     ui.events.put(("llm", True))                      # (any event, so the loop picks up the short idle time)
     wait_for("Idle", since)
     raw, out, _ = dictate(ui, "Prenota il tavolo per otto persone, anzi per dieci, alle nove di sera.")
-    check("LLM freed when idle, loaded again while speaking", "dieci" in out and "otto" not in out)
+    check("LLM freed when idle, loaded again while speaking", ("dieci" in out or "10" in out) and "otto" not in out and "8" not in out)
 
     since = len(said)
     ui.events.put(("llm", False))

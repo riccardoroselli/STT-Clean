@@ -194,12 +194,12 @@ class TestLLMProviders(unittest.TestCase):
     def test_style_adds_one_rule(self):
         c = Cleaner("x", "", Glossary(None))
         self.assertNotIn("\n8.", c.system_prompt())
-        self.assertIn("\n8. Then format the result as a bullet list", c.system_prompt("bullets"))
+        self.assertIn("\n8. Bullet-list style:", c.system_prompt("bullets"))
         self.assertEqual(c.system_prompt("gone-in-an-update"), c.system_prompt())   # a saved style that no longer exists
         sent = {}
         c._post = lambda path, body, timeout: sent.update(body) or {"message": {"content": "- a\n- b"}}
         self.assertEqual(c.clean("a e poi b", style="bullets"), "- a\n- b")
-        self.assertIn("bullet list", sent["messages"][0]["content"])
+        self.assertIn("Bullet-list style", sent["messages"][0]["content"])
 
     def test_built_in_models_need_mlx_lm(self):
         import cleanup

@@ -50,5 +50,7 @@ found stt || print -r -- "
     ${PY:h}/hf download mlx-community/parakeet-tdt-0.6b-v3
   Other models: see \"Models\" in README.md."
 found cleanup || print -r -- "
-! No LLM server running, so you get the raw transcript. For the clean-up, install Ollama
-  (https://ollama.com), then:  ollama pull gemma4:12b-mlx   (or use any model in LM Studio)"
+! No LLM found, so you get the raw transcript. For the clean-up, either
+  - install Ollama (https://ollama.com), then:  ollama pull gemma4:12b-mlx   (or use any model in LM Studio), or
+  - download an LLM that STT-Clean runs itself (7 GB, no other app needed), then pick it in the menu → LLM:
+      ${PY:h}/hf download mlx-community/gemma-4-12B-it-4bit"
