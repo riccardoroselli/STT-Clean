@@ -2,9 +2,8 @@
 
 available() lists the models a click away (downloaded, engine installed): the menu's Speech list.
 load(engine, model) -> (transcribe, sample_rate). transcribe(audio) takes 1-D float32
-mono audio at sample_rate, in [-1, 1], and returns its sentences as (text, start, end) in seconds;
-text(sentences) joins them. Each engine imports its package only when picked, so only the engine
-in use has to be installed.
+mono audio at sample_rate, in [-1, 1], and returns its sentences as (text, start, end) in seconds.
+Each engine imports its package only when picked, so only the engine in use has to be installed.
 
     parakeet  NVIDIA Parakeet TDT with parakeet-mlx (default)
     whisper   OpenAI Whisper family with mlx-whisper (install.sh adds it without PyTorch)
@@ -19,8 +18,7 @@ import hfcache
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")   # use the models already on this Mac, never download one
 
-DEFAULT_MODELS = {"parakeet": "mlx-community/parakeet-tdt-0.6b-v3",
-                  "whisper": "mlx-community/whisper-large-v3-turbo"}
+DEFAULT_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"   # loaded at launch until you pick another one
 MLX_CACHE = 1 << 30
 # the live draft re-transcribes ever-longer clips; MLX would cache every buffer size (22 GB after
 # a 60 s dictation with Parakeet) and starve the LLM. A 1 GB cap costs no speed.
@@ -47,10 +45,6 @@ def available() -> list[tuple[str, str]]:
             and any(os.path.exists(os.path.join(folder, w)) for w in WEIGHTS[engine])]
 
 
-def text(sentences: list) -> str:
-    return " ".join(s[0] for s in sentences)
-
-
 def free_cache() -> None:
     """Between dictations: give MLX's buffer cache (~1 GB after a long clip) back to the system.
     Measured: the next transcription is as fast (5-40 s clips, 27 Oct 2026)."""
@@ -58,13 +52,11 @@ def free_cache() -> None:
         sys.modules["mlx.core"].clear_cache()
 
 
-def load(engine: str, model: str = ""):
-    engines = {"parakeet": _parakeet, "whisper": _whisper}
-    if engine not in engines:
-        raise ValueError(f'unknown speech engine "{engine}": use {", ".join(engines)}')
+def load(engine: str, model: str):
+    """`engine` and `model` as available() lists them."""
     if "mlx_whisper.transcribe" in sys.modules:   # mlx-whisper keeps its model in a class attribute: free it
         sys.modules["mlx_whisper.transcribe"].ModelHolder.model = None   # (reloaded on its next use if still picked)
-    return engines[engine](model or DEFAULT_MODELS[engine])
+    return {"parakeet": _parakeet, "whisper": _whisper}[engine](model)
 
 
 def _parakeet(model: str):
@@ -83,11 +75,8 @@ def _parakeet(model: str):
 
 def _whisper(model: str):
     import mlx.core as mx
-    try:
-        import mlx_whisper
-        from mlx_whisper.audio import SAMPLE_RATE
-    except ImportError:
-        raise ImportError("the whisper engine needs mlx-whisper: run ./install.sh again") from None
+    import mlx_whisper
+    from mlx_whisper.audio import SAMPLE_RATE
     mx.set_cache_limit(MLX_CACHE)
 
     def transcribe(audio: np.ndarray) -> list:   # the model is loaded (and cached) on the first call

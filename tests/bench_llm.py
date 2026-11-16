@@ -89,7 +89,7 @@ CASES = [
 
 
 def bench(model: str, glossary: Glossary) -> int:
-    c = Cleaner(model, "", glossary, timeout=30, provider=SETTINGS["llm_provider"])
+    c = Cleaner(model, glossary, timeout=30, provider=SETTINGS["llm_provider"])
     warning = c.check()
     if warning:
         print(f"⚠️  {warning}")

@@ -53,7 +53,7 @@ VERSION = "1.1"
 DEFAULTS = {"llm": True, "live": True,                    # switches: smart clean-up, live text while speaking
             "style": "clean",                             # what the LLM does with the text (cleanup.STYLES)
             "shortcut": "",                               # start/stop hot key ("" = off)
-            "stt": "parakeet", "stt_model": "",           # speech engine and model ("" = its default)
+            "stt": "parakeet", "stt_model": "",           # speech engine and model ("" = found at launch)
             "llm_provider": "ollama", "llm_model": ""}    # LLM server and model ("" = found at launch)
 
 

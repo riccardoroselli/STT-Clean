@@ -40,10 +40,6 @@ HTTPServer(("127.0.0.1", int(sys.argv[sys.argv.index("--port") + 1])), Handler).
 
 
 class TestSpeechEngines(unittest.TestCase):
-    def test_unknown_engine(self):
-        with self.assertRaisesRegex(ValueError, "parakeet, whisper"):
-            stt.load("piper")
-
     def test_available_lists_loadable_models_only(self):
         parakeet = {"target": "nemo.collections.asr.models.rnnt_bpe_models.EncDecRNNTBPEModel"}
         whisper = {"n_mels": 80, "n_audio_state": 384}
@@ -76,14 +72,14 @@ class TestLLMProviders(unittest.TestCase):
     def test_unknown_provider(self):
         for provider in ("openai", "port:", "port:80a"):
             with self.assertRaisesRegex(ValueError, "ollama, lmstudio, mlx or port:<number>"):
-                Cleaner("x", "", Glossary(None), provider=provider)
+                Cleaner("x", Glossary(None), provider=provider)
 
     def test_default_urls(self):
-        self.assertEqual(Cleaner("x", "", Glossary(None)).url, "http://127.0.0.1:11434")
-        self.assertEqual(Cleaner("x", "", Glossary(None), provider="lmstudio").url, "http://127.0.0.1:1234/v1")
+        self.assertEqual(Cleaner("x", Glossary(None)).url, "http://127.0.0.1:11434")
+        self.assertEqual(Cleaner("x", Glossary(None), provider="lmstudio").url, "http://127.0.0.1:1234/v1")
 
     def test_lmstudio_request_and_reply(self):
-        c = Cleaner("qwen3", "http://h/v1/", Glossary(None), provider="lmstudio")
+        c = Cleaner("qwen3", Glossary(None), provider="lmstudio")
         sent = {}
 
         def post(path, body, timeout):
@@ -97,7 +93,7 @@ class TestLLMProviders(unittest.TestCase):
         self.assertNotIn("think", sent["body"])        # Ollama-only fields stay out
 
     def test_lmstudio_strict_server_drops_thinking_fields(self):
-        c = Cleaner("x", "", Glossary(None), provider="lmstudio")
+        c = Cleaner("x", Glossary(None), provider="lmstudio")
         bodies = []
 
         def post(path, body, timeout):
@@ -111,7 +107,7 @@ class TestLLMProviders(unittest.TestCase):
         self.assertEqual(len(bodies), 3)               # one rejected request, then plain ones only
 
     def test_other_400_keeps_thinking_off(self):
-        c = Cleaner("x", "", Glossary(None), provider="lmstudio")
+        c = Cleaner("x", Glossary(None), provider="lmstudio")
 
         def post(path, body, timeout):               # e.g. a dictation too long for the server's context
             raise urllib.error.HTTPError(path, 400, "context length exceeded", {}, None)
@@ -120,7 +116,7 @@ class TestLLMProviders(unittest.TestCase):
         self.assertTrue(c.no_think)
 
     def test_lmstudio_cut_off(self):
-        c = Cleaner("x", "", Glossary(None), provider="lmstudio")
+        c = Cleaner("x", Glossary(None), provider="lmstudio")
         c._post = lambda *_, **__: {"choices": [{"message": {"content": "Ciao"}, "finish_reason": "length"}]}
         self.assertIsNone(c.clean("ciao come stai"))
         self.assertIn("cut off", c.last_error)
@@ -131,7 +127,7 @@ class TestLLMProviders(unittest.TestCase):
                  {"message": {"content": "Ciao.", "thinking": "..."}, "done_reason": "stop"}),
                 ("port:8080", {"choices": [{"message": {"content": "<think>Okay, so"}, "finish_reason": "length"}]},
                  {"choices": [{"message": {"content": "<think>hm</think>Ciao."}, "finish_reason": "stop"}]})):
-            c = Cleaner("deepseek-r1", "", Glossary(None), provider=provider)
+            c = Cleaner("deepseek-r1", Glossary(None), provider=provider)
             budgets = []
 
             def post(path, body, timeout, base=""):
@@ -143,7 +139,7 @@ class TestLLMProviders(unittest.TestCase):
             self.assertEqual(budgets, [66, 2114, 2114])        # one cut-off request, then room from the start
 
     def test_lmstudio_check(self):
-        c = Cleaner("missing", "", Glossary(None), provider="lmstudio")
+        c = Cleaner("missing", Glossary(None), provider="lmstudio")
         c._post = lambda *_, **__: {"data": [{"id": "qwen3-8b"}, {"id": "text-embedding-nomic"}]}
         self.assertEqual(c.models(1), ["qwen3-8b"])     # embedding models can't chat
         self.assertIn("isn't in LM Studio", c.check())
@@ -151,7 +147,7 @@ class TestLLMProviders(unittest.TestCase):
         self.assertIsNone(c.check())
 
     def test_any_local_server_speaks_the_openai_api(self):
-        c = Cleaner("gemma", "", Glossary(None), provider="port:9931")
+        c = Cleaner("gemma", Glossary(None), provider="port:9931")
         self.assertEqual((c.url, c.label), ("http://127.0.0.1:9931/v1", "the server on port 9931"))
         sent = []
         c._post = lambda path, body, timeout, base="": sent.append(path) or {
@@ -189,10 +185,10 @@ class TestLLMProviders(unittest.TestCase):
             self.assertEqual(asked.count("port:9931"), 2)
 
     def test_start_needs_a_known_server(self):
-        self.assertFalse(Cleaner("x", "", Glossary(None), provider="port:9931").start(wait=0))
+        self.assertFalse(Cleaner("x", Glossary(None), provider="port:9931").start(wait=0))
 
     def test_style_adds_one_rule(self):
-        c = Cleaner("x", "", Glossary(None))
+        c = Cleaner("x", Glossary(None))
         self.assertNotIn("\n8.", c.system_prompt())
         self.assertIn("\n8. Bullet-list style:", c.system_prompt("bullets"))
         self.assertEqual(c.system_prompt("gone-in-an-update"), c.system_prompt())   # a saved style that no longer exists
@@ -220,7 +216,7 @@ class TestLLMProviders(unittest.TestCase):
     def test_built_in_server_lifecycle(self):
         import cleanup
         with mock.patch.object(cleanup, "MLX_MAIN", STUB_SERVER), mock.patch.object(cleanup, "mlx_models", return_value=["me/llm"]):
-            c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
+            c = Cleaner("me/llm", Glossary(None), provider="mlx")
             self.addCleanup(c.unload)
             self.assertIsNone(c.check())
             self.assertIsNone(c.clean("ciao"))               # not started yet: no text, no crash
@@ -237,7 +233,7 @@ class TestLLMProviders(unittest.TestCase):
                      + STUB_SERVER.replace('self.reply({"status": "ok"})', "self.send_error(503)"))
         for broken in ("raise SystemExit('ValueError: Model type x not supported.')", unhealthy):
             with mock.patch.object(cleanup, "MLX_MAIN", broken):
-                c = Cleaner("me/llm", "", Glossary(None), provider="mlx")
+                c = Cleaner("me/llm", Glossary(None), provider="mlx")
                 t0 = time.monotonic()
                 self.assertFalse(c.warm_up())
                 self.assertLess(time.monotonic() - t0, 10)       # at once, not after the 3 minutes a load may take
@@ -247,7 +243,7 @@ class TestLLMProviders(unittest.TestCase):
     def test_built_in_server_quits_with_its_parent(self):
         import cleanup
         parent = ("import os, sys; sys.path.insert(0, sys.argv[1]); import cleanup; cleanup.MLX_MAIN = sys.argv[2]\n"
-                  "c = cleanup.Cleaner('m', '', cleanup.Glossary(None), provider='mlx'); assert c.serve()\n"
+                  "c = cleanup.Cleaner('m', cleanup.Glossary(None), provider='mlx'); assert c.serve()\n"
                   "print(c.process.pid, flush=True); os._exit(0)")     # killed: no clean-up of its own
         out = subprocess.run([sys.executable, "-c", parent, os.path.dirname(cleanup.__file__), STUB_SERVER],
                              capture_output=True, text=True, timeout=30)

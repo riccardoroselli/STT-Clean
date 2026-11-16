@@ -73,13 +73,14 @@ class TestSafety(unittest.TestCase):
         self.assertEqual(strip_wrapping("ciao", "«Ciao.»"), "Ciao.")
 
     def test_unreachable_ollama_falls_back(self):
-        c = Cleaner("x", "http://127.0.0.1:9", Glossary(None), timeout=0.5)
+        c = Cleaner("x", Glossary(None), timeout=0.5)
+        c.url = "http://127.0.0.1:9"       # nothing listens there
         self.assertIsNone(c.clean("ciao"))
         self.assertTrue(c.last_error)
         self.assertIn("isn't running", c.check())
 
     def test_cut_off_output_falls_back(self):
-        c = Cleaner("x", "http://127.0.0.1:9", Glossary(None))
+        c = Cleaner("x", Glossary(None))
         c._post = lambda *_, **__: {"done_reason": "length", "message": {"content": "Ciao, come"}}
         self.assertIsNone(c.clean("ciao come stai"))
         self.assertIn("cut off", c.last_error)

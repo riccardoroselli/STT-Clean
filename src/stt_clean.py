@@ -5,16 +5,17 @@ Click the STT-Clean icon in the menu bar, speak, click it again (Esc cancels).
 While you speak, a live draft is typed where your cursor is, in any app.
 On stop the audio is transcribed again, cleaned up by a local LLM (self-corrections like "no cancella",
 spoken punctuation, glossary spellings, "scrivilo in inglese"), and the draft is replaced with the final text.
-Right-click it for About, the last status line, the Speech and LLM lists (what is installed, one
-click to switch), the switches (smart clean-up, live text), Edit Glossary and Quit.
-Everything runs on this Mac: speech with MLX (stt.py), the LLM in Ollama or LM Studio (cleanup.py).
+Right-click it for the status line, the Speech and LLM lists (every model found on this Mac, one
+click to switch), Style, the switches (smart clean-up, live text), Shortcut, Edit Glossary and Quit.
+Everything runs on this Mac: speech with MLX (stt.py), the LLM in any local server or built in (cleanup.py).
 
     open build/STT-Clean.app          # normal use (./install.sh builds it)
     .venv/bin/python src/stt_clean.py           # same, from a terminal (log in the terminal)
     .venv/bin/python src/stt_clean.py --no-paste  # only print the text (live draft in the terminal)
 
 Modules: menubar (icon, menu, status line), audio (mic), live (live-draft text), output (typing,
-clipboard, paste), esc_key (Esc while recording), stt (speech engines), cleanup (LLM + glossary).
+clipboard, paste), hotkey (Esc, the shortcut), stt (speech engines), hfcache (models on disk),
+cleanup (LLM + glossary).
 This file: the options and the worker loop.
 """
 import argparse
@@ -97,7 +98,7 @@ def work(args, ui: MenuBar) -> None:
     found = [(p, n) for _, p, names in cleanup.available() for n in names]
     if not model:             # nothing picked yet: the recommended model if installed, else the first one found
         provider, model = ("ollama", DEFAULT_LLM) if not found or ("ollama", DEFAULT_LLM) in found else found[0]
-    cleaner = Cleaner(model, "", glossary, provider=provider)
+    cleaner = Cleaner(model, glossary, provider=provider)
     ui.current_llm = (provider, model)
     atexit.register(lambda: cleaner.unload())   # frees the LLM's RAM on any exit (the current one)
 
@@ -157,7 +158,7 @@ def work(args, ui: MenuBar) -> None:
             warnings.append(f"⚠️  {error} Raw transcript until that's fixed.")
 
     # only speech models already on this Mac: the last pick first, then Parakeet v3, then any other
-    found = sorted(stt.available(), key=lambda c: (c != (s["stt"], s["stt_model"]), c[1] != stt.DEFAULT_MODELS["parakeet"]))
+    found = sorted(stt.available(), key=lambda c: (c != (s["stt"], s["stt_model"]), c[1] != stt.DEFAULT_MODEL))
     transcribe, sr, engine, stt_model = None, 0, "", ""
     for e, m in found:
         try:
@@ -177,7 +178,7 @@ def work(args, ui: MenuBar) -> None:
     ui.ready = transcribe is not None
     AppHelper.callAfter(ui.show)
     if ui.ready:
-        status(f"Ready: click the STT-Clean icon to dictate, click again to stop, Esc to cancel. LLM: {llm}.", keep=True)
+        status(f"Ready: click the icon to dictate, Esc cancels. LLM: {llm}.", keep=True)
     # typing the draft and ⌘V need Accessibility; this also opens the system prompt to allow it
     if not args.no_paste and not AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
         warnings.append("⚠️  Allow STT-Clean in System Settings → Privacy & Security → Accessibility "
@@ -277,7 +278,7 @@ def work(args, ui: MenuBar) -> None:
             provider, model = data
             old = cleaner
             llm_free()                    # don't hold two models in RAM
-            cleaner = Cleaner(model, "", glossary, provider=provider)
+            cleaner = Cleaner(model, glossary, provider=provider)
             if error := llm_error():
                 llm_free()                # it may have loaded before failing (e.g. it answers instead of cleaning)
                 cleaner = old
@@ -334,7 +335,11 @@ def work(args, ui: MenuBar) -> None:
                 fresh, heard = 0, False
                 so_far = np.concatenate(chunks)
                 chunks = [so_far]
-                draft = tail.draft(so_far)
+                try:
+                    draft = tail.draft(so_far)
+                except Exception as e:    # one bad update must not end the worker: the recording goes on,
+                    status(f"⚠️  Live text: {type(e).__name__}: {e}", keep=True)   # the final pass still runs
+                    continue
                 cols = shutil.get_terminal_size().columns - 18   # one line, or \r can't redraw it
                 status("● Recording ...", log=False, detail=" " + draft[-cols:])
                 if can_type and can_post(target):   # else skip this update: the next one catches up

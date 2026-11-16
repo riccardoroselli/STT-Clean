@@ -106,6 +106,18 @@ def main() -> None:
     check("style from the menu: bullet list, with live drafts", out.count("\n- ") >= 2 and "vino" in out and drafts >= 2)
     ui.settings["style"] = "clean"
 
+    class Flaky(stt_clean.Tail):                      # its first live update fails (as MLX can when memory is short)
+        def draft(self, audio):
+            if not hasattr(self, "failed"):
+                self.failed = True
+                raise RuntimeError("test: this live update fails")
+            return super().draft(audio)
+    stt_clean.Tail, since = Flaky, len(said)
+    raw, out, _ = dictate(ui, "Per la cena servono tre cose. Il pane, il vino rosso e un dolce al cioccolato.")
+    check("a failed live update doesn't end the dictation",
+          "vino" in out and any(m.startswith("⚠️  Live text") for m in said[since:]))
+    stt_clean.Tail = Flaky.__base__
+
     stt_clean.IDLE_UNLOAD, since = 2, len(said)       # idle: the LLM is freed, then loads again while speaking
     ui.events.put(("llm", True))                      # (any event, so the loop picks up the short idle time)
     wait_for("Idle", since)

@@ -1,8 +1,8 @@
 #!/bin/zsh
 # Installs STT-Clean in this folder:  ./install.sh
-#   1. a Python environment in .venv with the app's Python packages (~0.5 GB; no models)
-#   2. the app, build/STT-Clean.app, and opens it
-# It downloads no model: STT-Clean uses the speech models and LLMs already on this Mac.
+#   1. a Python environment in .venv with the app's Python packages (0.8 GB; no models)
+#   2. the app, build/STT-Clean.app, opens it and waits until it is ready
+# It downloads no model: STT-Clean finds and uses the speech models and LLMs you download.
 # Run it again after updating (git pull): it only adds what is missing and rebuilds the app.
 # Use your own Python environment instead of .venv:  STT_CLEAN_PYTHON=/path/to/python ./install.sh
 set -e
@@ -36,19 +36,32 @@ $PY -m pip install --disable-pip-version-check --no-deps mlx-whisper==0.4.3   # 
 
 step "Building the app"
 STT_CLEAN_PYTHON=$PY zsh macos/build_app.sh
+rm -f logs/stt-clean.log
 open build/STT-Clean.app
+print -n "Starting STT-Clean "           # until its log says Ready, or what is missing (e.g. no speech model yet)
+for i in {1..90}; do
+  grep -qE "^Ready|⚠️" logs/stt-clean.log 2>/dev/null && break
+  print -n "."; sleep 1
+done
+print
+[[ -s logs/stt-clean.log ]] || fail "
+STT-Clean didn't start. If this folder is on an external drive, allow it in System Settings → Privacy & Security →
+  Files & Folders → STT-Clean → Removable Volumes, then:  open $PWD/build/STT-Clean.app
+  Otherwise see \"Troubleshooting\" in README.md."
 
 found() { $PY -c "import sys; sys.path.insert(0, 'src'); import $1; sys.exit(not $1.available())" 2>/dev/null }
 print -r -- "
-✓ STT-Clean is running: its icon is in the menu bar (top right).
+✓ STT-Clean is installed and running: its icon is in the menu bar (top right).
   - Allow Accessibility when macOS asks (to type the text), and the Microphone on your first dictation.
-  - Right-click the icon: Speech and LLM list the models already on this Mac.
-  - Click the icon, speak, click again.
-  - Start it at login: System Settings → General → Login Items → + → $PWD/build/STT-Clean.app"
+  - Click the icon, speak, click again. Right-click it for the menu.
+  - STT-Clean downloads no model: it uses the ones you download and finds them by itself.
+    Its Speech and LLM lists show every model found on this Mac, one click to switch.
+  - Open it again later:  open $PWD/build/STT-Clean.app
+    (at every login: System Settings → General → Login Items → + → that app)"
 found stt || print -r -- "
-! No speech model on this Mac yet. Download one (2.3 GB), then pick it in the menu → Speech:
+! No speech model on this Mac yet. Download one, e.g. the recommended one (2.3 GB), then pick it in the menu → Speech:
     ${PY:h}/hf download mlx-community/parakeet-tdt-0.6b-v3
-  Other models: see \"Models\" in README.md."
+  Other models: \"Models\" in README.md."
 found cleanup || print -r -- "
 ! No LLM found, so you get the raw transcript. For the clean-up, either
   - install Ollama (https://ollama.com), then:  ollama pull gemma4:12b-mlx   (or use any model in LM Studio), or

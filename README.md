@@ -6,16 +6,23 @@
 ![macOS 14+, Apple silicon](https://img.shields.io/badge/macOS-14%2B%2C%20Apple%20silicon-lightgrey)
 ![Python 3.12 | 3.13 | 3.14](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)
 
-STT-Clean is a macOS menu-bar app that types what you say into any app, at the cursor. While you
-speak, a live draft appears as you talk, transcribed on your Mac by Parakeet or Whisper (MLX on
-Apple silicon). When you stop, a local LLM refines it: it applies spoken corrections ("scratch
-that"), punctuation ("comma", "new line"), your glossary's spellings and translation ("write it
-in English"), and the clean text replaces the draft. The LLM runs in Ollama, LM Studio or any
-other local server (llama.cpp, mlx-lm, Jan, ...). STT-Clean is a wrapper around models you
-already have: it finds them, lists them in its menu, and never downloads one. Nothing leaves your
-Mac. On an M4 with Parakeet TDT 0.6B v3, the live draft updates every 0.5 s however long you
-speak, the final transcript of a 70 s dictation is ready 0.2 s after you stop, and
-`gemma4:12b-mlx` refines a dictation in 0.6–3.3 s.
+STT-Clean is a macOS menu-bar app that types what you say into any app, at the cursor. A speech
+model on your Mac writes a live draft while you talk. When you stop, a local LLM refines it: it
+applies spoken corrections ("scratch that"), punctuation ("comma", "new line"), your glossary's
+spellings and translation ("write it in English"), and the clean text replaces the draft. Nothing
+leaves your Mac.
+
+**You choose the models, STT-Clean finds them.** It contains no model and never downloads one.
+You download the speech model and the LLM you prefer, STT-Clean discovers them on its own and lists
+them in its menu, one click to switch:
+
+- **Speech:** any Parakeet or Whisper model in MLX format in your Hugging Face cache.
+- **LLM:** any model in Ollama, in LM Studio, in any other local server (llama.cpp, mlx-lm, Jan, ...),
+  or in your Hugging Face cache, run by STT-Clean itself with no other app.
+
+On an M4 with Parakeet TDT 0.6B v3, the live draft updates every 0.5 s however long you speak, the
+final transcript of a 70 s dictation is ready 0.2 s after you stop, and `gemma4:12b-mlx` refines a
+dictation in 0.6–3.5 s.
 
 | You say | Pasted |
 |---|---|
@@ -26,6 +33,29 @@ speak, the final transcript of a 70 s dictation is ready 0.2 s after you stop, a
 
 *Real outputs of `gemma4:12b-mlx` from `tests/bench_llm.py` and `tests/e2e_pipeline.py`.*
 
+## Quick start
+
+On a Mac with Apple silicon, Python 3.12–3.14 and Apple's command line tools ([details](#install)):
+
+```bash
+# 1. Install the app (no model is downloaded)
+git clone https://github.com/riccardoroselli/STT-Clean.git
+cd STT-Clean
+./install.sh
+
+# 2. Download the speech model you prefer, for example Parakeet (2.3 GB)
+.venv/bin/hf download mlx-community/parakeet-tdt-0.6b-v3
+
+# 3. Optional: download an LLM for the refinement, for example with Ollama (https://ollama.com, 7.7 GB)
+ollama pull gemma4:12b-mlx
+```
+
+4. Right-click the STT-Clean icon in the menu bar and pick your model under **Speech** (and under
+   **LLM**).
+5. Click the icon, speak, click again. The text is typed where your cursor is.
+
+Other models and where STT-Clean looks for them: [Models](#models).
+
 ## Install
 
 | You need | Check / get it |
@@ -34,38 +64,45 @@ speak, the final transcript of a 70 s dictation is ready 0.2 s after you stop, a
 | Apple's command line tools (for `git` and to build the app) | `xcode-select --install` |
 | Python 3.12, 3.13 or 3.14 (3.15 is too new for some dependencies yet) | [python.org](https://www.python.org/downloads/macos/) or `brew install python@3.14` |
 
-```bash
-git clone https://github.com/riccardoroselli/STT-Clean.git
-cd STT-Clean
-./install.sh
-```
+`./install.sh` does the rest in one run:
 
-`install.sh` creates a Python environment in `.venv` inside the folder (under 1 GB, no
-models), builds `build/STT-Clean.app` and opens it. When it finishes it tells you if a speech model
-or an LLM is missing, with the command to get one. To use a Python environment you already have
-instead of `.venv`: `STT_CLEAN_PYTHON=/path/to/python ./install.sh`.
+| Step | What it does |
+|---|---|
+| Python packages | Creates `.venv` inside the folder and installs the 67 packages of `src/requirements.txt` (0.8 GB, no models, no PyTorch) |
+| App | Builds `build/STT-Clean.app` and opens it |
+| Check | Waits until the app is ready, then lists what is still missing (a speech model, an LLM) with the command to get it |
 
-The app runs from this folder, so keep it where you cloned it. To update: `git pull`, then
-`./install.sh` again.
+To use a Python environment you already have instead of `.venv`:
+`STT_CLEAN_PYTHON=/path/to/python ./install.sh`.
+
+The app runs from this folder, so keep it where you cloned it. Open it again with
+`open build/STT-Clean.app`. To update: `git pull`, then `./install.sh` again.
 
 ### First launch
 
 1. **Accessibility:** allow it when macOS asks. STT-Clean needs it to type the text.
 2. **Microphone:** allow it on your first dictation.
-3. **Speech model:** right-click the icon → **Speech**. If the list is empty, download one (next
-   section). The new model shows up the next time you open the menu, no restart needed.
+3. **Speech model:** right-click the icon → **Speech** and pick one. If the list is empty, download
+   one (next section). It shows up the next time you open the menu, no restart needed.
 4. **Start at login** (optional): System Settings → General → Login Items → + →
    `build/STT-Clean.app`.
 
 ## Models
 
-STT-Clean uses the models already on your Mac and checks for new ones every time you open its menu.
+STT-Clean is a front end for models you download yourself: it contains none and downloads none.
+It looks for them every time you open its menu, so a model you download while it runs appears
+without a restart, and a model you delete disappears. Nothing has to be configured.
 
 | Kind | Found in | Formats | Picked at launch |
 |---|---|---|---|
 | Speech | The Hugging Face cache: `~/.cache/huggingface/hub`, or `$HF_HOME/hub` if it was set when you ran `install.sh` | Parakeet and Whisper in MLX format (`mlx-community/…`) | Your last pick, else Parakeet TDT 0.6B v3, else the first one found |
 | LLM in a server | Every chat model in [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai) and any other server running on a local port with the OpenAI-style API (`llama-server`, `mlx_lm.server`, Jan, vLLM, ...) | Any instruct model | Your last pick, else `gemma4:12b-mlx`, else the first one found |
 | LLM built in | The Hugging Face cache (menu → LLM → **Built in**). STT-Clean runs it itself with [mlx-lm](https://github.com/ml-explore/mlx-lm), no other app needed | Any LLM that mlx-lm supports | Only when you pick it |
+
+Speech models are recognized by the content of their `config.json`, not by their name, so
+fine-tunes and renamed copies are found too. LLM servers are found by asking them for their model
+list: Ollama and LM Studio on their own ports, and any other program listening on a local port that
+answers `GET /v1/models`.
 
 Download a speech model with the Hugging Face CLI that `install.sh` put in `.venv`:
 
@@ -95,7 +132,7 @@ The prompt was tuned on Gemma 4. Results of `tests/bench_llm.py` (21 dictations)
 
 | Model (in Ollama) | Passed | Time per dictation |
 |---|---|---|
-| `gemma4:12b-mlx` | 21/21 | 0.6–4.2 s |
+| `gemma4:12b-mlx` | 21/21 | 0.6–3.5 s |
 | `gemma4:26b-mlx` | 15/16 ¹ | 0.6–3.5 s |
 | `qwen3.8` (27B) | 15/16 ¹ | 12–23 s |
 | `SparkLLM/Spark-X2.5-4B` | 14/21 | 1.1–10 s |
@@ -162,7 +199,7 @@ the LLM, which fixes close mis-hearings from context. Changes apply from the nex
 
 | Step | What happens | Code |
 |---|---|---|
-| Record | The mic opens on click and closes on stop. Esc is a global hot key only while recording. | `src/menubar.py`, `src/audio.py`, `src/esc_key.py` |
+| Record | The mic opens on click and closes on stop. Esc is a global hot key only while recording. | `src/menubar.py`, `src/audio.py`, `src/hotkey.py` |
 | Live draft | Every ≥0.5 s the audio after the last finished sentence is transcribed again; finished sentences are not redone, and nothing runs while you are silent. Only words that two consecutive drafts agree on are typed, so the text grows instead of flickering. | `src/stt.py`, `src/live.py` |
 | Final pass | The unfinished tail is transcribed once more and the glossary's variants are replaced. | `src/stt_clean.py`, `src/cleanup.py` |
 | Refinement | The LLM (temperature 0, thinking off) applies the voice commands. On any failure, or an output that looks like an answer, the raw text is used. | `src/cleanup.py` |
@@ -240,7 +277,7 @@ src/                   The app (Python, ~1600 lines)
   requirements.txt     Pinned dependencies
 
 macos/                 App bundle: build_app.sh, launcher.c, Info.plist, AppIcon.icns, make_icon.py
-tests/                 46 unit tests, LLM benchmark, end-to-end and typing checks
+tests/                 45 unit tests, LLM benchmark, end-to-end and typing checks
 assets/                Logo and 1024 px app icon
 ```
 
@@ -250,9 +287,9 @@ assets/                Logo and 1024 px app icon
 
 ```bash
 .venv/bin/python src/stt_clean.py --no-paste    # run from a terminal: log there, text printed, not typed
-.venv/bin/python -m unittest discover tests     # 46 unit tests: live-draft logic, glossary, LLM servers, built-in server, engines, hot keys, settings
+.venv/bin/python -m unittest discover tests     # 45 unit tests: live-draft logic, glossary, LLM servers, built-in server, engines, hot keys, settings
 .venv/bin/python tests/bench_llm.py [model ...] # 21 dictations through the LLM picked in the menu, exit 1 on a failure
-.venv/bin/python tests/e2e_pipeline.py          # macOS `say` → the real worker loop (live draft, LLM, style, idle unload), no mic
+.venv/bin/python tests/e2e_pipeline.py          # macOS `say` → the real worker loop (live draft, LLM, style, a failing update, idle unload), no mic
 .venv/bin/python tests/typing_check.py          # replays heavy live-draft churn into TextEdit (takes the keyboard ~15 s)
 ```
 

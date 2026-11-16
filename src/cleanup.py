@@ -151,13 +151,12 @@ def strip_wrapping(raw: str, out: str) -> str:
 
 
 class Cleaner:
-    def __init__(self, model: str, url: str, glossary: Glossary, timeout: float = 3.0, provider: str = "ollama"):
+    def __init__(self, model: str, glossary: Glossary, timeout: float = 3.0, provider: str = "ollama"):
         port = provider.removeprefix("port:")
         if provider not in SERVERS and not (provider.startswith("port:") and port.isdigit()):
             raise ValueError(f'unknown LLM provider "{provider}": use {", ".join(SERVERS)} or port:<number>')
         self.model, self.glossary, self.timeout, self.provider = model, glossary, timeout, provider
-        self.label, default_url = SERVERS.get(provider) or (f"the server on port {port}", f"http://127.0.0.1:{port}/v1")
-        self.url = (url or default_url).rstrip("/")
+        self.label, self.url = SERVERS.get(provider) or (f"the server on port {port}", f"http://127.0.0.1:{port}/v1")
         self.last_error = ""
         self.down = False     # set by check(): the server didn't answer
         # thinking off (it would spend the output budget): reasoning_effort (OpenAI style) and
@@ -216,7 +215,6 @@ class Cleaner:
 
     def clean(self, raw: str, timeout: float | None = None, style: str = "clean") -> str | None:
         """Cleaned text in the menu's `style`, or None on any failure (caller falls back to raw)."""
-        self.glossary.maybe_reload()
         messages = [{"role": "system", "content": self.system_prompt(style)}, {"role": "user", "content": raw}]
         budget = len(raw) // 2 + 64 + self.thinking     # output tokens: enough for the text, not for an essay
         timeout = timeout or self.timeout + len(raw) / 40 + self.thinking / 30
@@ -311,7 +309,6 @@ class Cleaner:
             pass
 
 
-
 def mlx_models() -> list[str]:
     """The LLMs in the Hugging Face cache that the built-in server can run (none without mlx-lm)."""
     if not importlib.util.find_spec("mlx_lm"):
@@ -355,7 +352,7 @@ def available() -> list[tuple[str, str, list[str]]]:
 
     def models(server):
         try:
-            return Cleaner("", "", Glossary(None), provider=server[1]).models(timeout=1)
+            return Cleaner("", Glossary(None), provider=server[1]).models(timeout=1)
         except Exception:                          # not running, or not an LLM server: nothing to offer
             return None
     with ThreadPoolExecutor(len(servers)) as pool:  # together: a port that doesn't answer costs its 1 s once
